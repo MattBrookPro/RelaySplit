@@ -30,32 +30,28 @@ Different namespaces — that's expected and fine.)
 
 ---
 
-## Step 2 — UK/EU GPU region (verified live) ✅
+## Step 2 — UK GPU region (verified live) ✅
 
 The region string is the one value worth getting exactly right — closer datacenter =
 smaller network hop, which is the whole latency thesis.
 
-### How the region was chosen (empirical, not assumed)
-
-The VPS hostname was resolved and its IP geolocated:
-
-- `relaysplit.vaguelystrange.com` → **`204.168.135.201`**
-- Geolocation: **Hetzner Online GmbH (AS24940), Helsinki, Finland** — Northern Europe.
-
-So the GPU should sit in **Northern Europe** to minimise the GPU→VPS hop.
-
 ### Decision
 
 ```python
-@app.function(gpu="...", region="eu-north")   # primary pin — closest to a Helsinki VPS
+@app.function(gpu="...", region="uk")   # primary pin — lowest-latency UK↔UK path to Modal
 ```
 
-- **Primary:** `region="eu-north"` (narrow — Northern Europe, closest to Helsinki).
-- **Fallback:** `region="eu"` (broad — European Economic Area) if `eu-north` lacks the
-  desired GPU at deploy time, or to avoid the higher narrow-region cost multiplier.
+- **Primary:** `region="uk"` (United Kingdom). The project's latency-critical path is a
+  **UK↔UK** connection to Modal, so the GPU sits in the UK.
+- **Fallback:** `region="eu-west"`, then broad `region="eu"`, only if a chosen GPU isn't
+  available in `uk` at deploy time.
 
-> `uk` and `eu-west` were the natural first guesses but are **farther** from Finland than
-> `eu-north`. Don't pin those.
+### The Helsinki VPS does NOT drive this choice
+
+The VPS (`relaysplit.vaguelystrange.com` → `204.168.135.201`, **Hetzner, Helsinki, FI**)
+handles a **secondary** connection, not the latency-critical Modal path. Its Northern-Europe
+location is therefore irrelevant to the primary Modal region pin — do **not** pin `eu-north`
+for the primary GPU path.
 
 ### Verified region identifiers (from https://modal.com/docs/guide/region-selection)
 
@@ -78,13 +74,14 @@ Parameter is `region=` on `@app.function`. Full documented set:
 - **Cost multiplier:** pinning a region applies a multiplier on top of base pricing
   (the docs page indicated a higher multiplier for *narrow* regions than *broad* ones; a
   separate summary quoted different geography-based figures). **Re-confirm the exact current
-  multiplier on https://modal.com/pricing before relying on cost numbers.** `eu-north` is a
-  narrow region, so it costs more than broad `eu`.
+  multiplier on https://modal.com/pricing before relying on cost numbers.** `uk` is a
+  **broad** region, so it carries the lower (broad) multiplier — narrow fallbacks like
+  `eu-west` cost more.
 - **GPU availability per region is not published.** Platform GPU types are L4, A10,
   A100 (40/80 GB), L40S, H100, H200, B200 — but not every type is in every region. Modal
   errors at deploy/run if the chosen GPU isn't available in the pinned region. **Plan:** pin
-  `eu-north`, deploy, and if scheduling fails, either switch the GPU type or fall back to
-  broad `eu`.
+  `uk`, deploy, and if scheduling fails, either switch the GPU type or fall back to
+  `eu-west` / broad `eu`.
 
 ---
 
@@ -155,8 +152,8 @@ The signalling/control server runs **directly on the VPS** — do not run it loc
 ## Done when
 
 - [x] `modal token info` confirms auth; `modal` commands reach the API.
-- [x] Confirmed EU region string written down: **`eu-north`** (fallback `eu`), chosen from
-      the VPS being in Helsinki/Finland.
+- [x] Confirmed region string written down: **`uk`** (fallback `eu-west` / `eu`) — the
+      project's latency-critical path is UK↔UK to Modal; the Helsinki VPS is secondary.
 - [x] A WebRTC-capable browser (Chrome + Edge) and the Trickle ICE test page are ready.
 - [ ] (Deferred) JUCE/CMake noted for the plugin phase.
 - [x] Understood: the Node server lives and runs on the VPS, not here.

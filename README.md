@@ -17,9 +17,10 @@ GPU can sit inside a real-time audio path.
 
 ### Latency-critical fact
 
-The VPS is hosted at **Hetzner, Helsinki, Finland**. To minimise the GPU→VPS network hop,
-the Modal GPU function pins **`region="eu-north"`** (Northern Europe). See
-[`docs/setup-machine2.md`](docs/setup-machine2.md) for how this was verified and the fallback.
+The latency-critical path is a **UK↔UK** connection to Modal, so the Modal GPU function pins
+**`region="uk"`**. The Helsinki VPS (`relaysplit.vaguelystrange.com`, Hetzner FI) handles a
+**secondary** connection — it does **not** drive the Modal region. See
+[`docs/setup-machine2.md`](docs/setup-machine2.md) for the fallback chain and rationale.
 
 ## Roles by machine
 
