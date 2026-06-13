@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RelaySplit — control plane</title>
+<style>
+  body { font: 15px/1.6 system-ui, sans-serif; max-width: 640px; margin: 48px auto; padding: 0 16px; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  code { background: #f0f0f0; padding: 1px 5px; border-radius: 4px; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 4px; font-family: ui-monospace, monospace; }
+  .ok { background: #d4f7d4; } .bad { background: #f7d4d4; }
+  ul { padding-left: 18px; }
+</style>
+</head>
+<body>
+<h1>RelaySplit</h1>
+<p>Control plane — <span id="status" class="badge">checking…</span></p>
+<p>Network-delivered real-time GPU audio processing. This service is the <b>control plane</b>:
+   it handles signalling, presence and ephemeral TURN credentials. Audio never passes through
+   it — that's the data plane (WebRTC, peer-to-peer or TURN-relayed).</p>
+<ul>
+  <li>WebRTC signalling: <code>wss://relaysplit.vaguelystrange.com/ws</code></li>
+  <li>Ephemeral TURN: <code>POST /api/turn</code></li>
+  <li>Presence: <code>GET /api/channels</code></li>
+</ul>
+<script>
+  fetch("/api/health")
+    .then((r) => r.json())
+    .then((d) => {
+      const el = document.getElementById("status");
+      el.textContent = d.status + " · " + d.time;
+      el.className = "badge ok";
+    })
+    .catch((e) => {
+      const el = document.getElementById("status");
+      el.textContent = "unreachable: " + e;
+      el.className = "badge bad";
+    });
+</script>
+</body>
+</html>
