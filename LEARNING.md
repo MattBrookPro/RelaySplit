@@ -73,15 +73,39 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
 - **(d)** *"It's live on a UK box over HTTPS with a TURN relay; I deploy it under pm2 and there's a
   smoke test that asserts the signalling relay still routes."*
 
+### ✅ Real-time GPU inference (causal-family Conv-TasNet)
+- **(b)** [`gpu/relaysplit_gpu.py`](gpu/relaysplit_gpu.py) — `Separator.load()` loads
+  `groadabike/ConvTasNet_DAMP-VSEP_enhboth` (asteroid Conv-TasNet, vocals/accompaniment) onto the
+  GPU once at container start (`@modal.enter`); weights baked into the image at build (`_bake_model`);
+  region `uk`.
+- **(c)** Conv-TasNet is the brief's named family (time-domain, GPU-friendly). Measured on an L4:
+  inference is **~20 ms per block regardless of block size** (whole-clip RTF 0.0035). The SAME model
+  on CPU was marginal — realtime ratio 0.63 at 1 s blocks rising to 0.97 at 64 ms — so the GPU is
+  what makes *low-latency* separation possible. (The popular DAMP-Vocals forks are TorchScript-traced
+  to CPU and can't use a GPU; the asteroid-native original can.) 8 kHz model → bandlimited vocals,
+  honest quality caveat; HS-TasNet is the full-band real-time upgrade.
+
+  | block | GPU infer | GPU ratio | CPU ratio |
+  |------:|----------:|----------:|----------:|
+  | 1000 ms | 22 ms | 0.02 | 0.64 |
+  | 250 ms | 19 ms | 0.08 | 0.70 |
+  | 128 ms | 19 ms | 0.15 | 0.81 |
+  | 64 ms | — | — | 0.97 |
+
+- **(d)** *"I keep a region-pinned Conv-TasNet warm on a GPU; it infers a block in ~20 ms flat, so
+  low-latency blocks have huge headroom. The same model on CPU runs out of headroom right at the
+  low-latency end — that's the measured case for the GPU."*
+
 ### 🟡 Full latency story (instrumentation) — *control-plane half done; meter is ⏳*
 - TURN/region/warm-start are in place conceptually; the live network-RTT-vs-inference **meter** is
   not built yet (data-plane work). Don't claim the meter until step 6 lands.
 
-### ⏳ C++ / JUCE plugin · audio-thread discipline · real-time GPU inference (causal model) · live latency meter
-- Not built yet. Planned per the brief's spine (steps 2–4, 6). The spike proves the transport they
-  sit on; the plugin replaces the browser client, and the Modal container swaps passthrough for a
-  causal separation model. **Interview-honest:** "the transport and control plane are proven and
-  live; the plugin and the model are the next slices."
+### ⏳ C++ / JUCE plugin · audio-thread discipline · live latency meter · real-time aiortc wiring
+- Not built yet. Planned per the brief's spine (steps 3–4, 6). The model is proven on the GPU; the
+  next data-plane slice wires it into an aiortc track (resample 48k↔8k, block + overlap-add, emit
+  the vocal stem) so live audio is separated through the container. **Interview-honest:** "the
+  transport, control plane, and GPU model are all proven and live; the plugin and the real-time
+  audio glue are the next slices."
 
 ---
 
