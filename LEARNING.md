@@ -121,7 +121,25 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
   end-to-end ≈ 270 ms (chunk+fade) + 118 ms + 13 ms ≈ **~0.4 s** mouth-to-ear through a cloud GPU.
   fp16 + a faster GPU are the levers to cut the inference term further.
 
-### 🟡 C++ / JUCE plugin — foundation builds (Phase 1); WebRTC client = Phase 2
+### ✅ Always-on demo feed (interview demo-safety)
+- **(b)** [`gpu/relaysplit_live.py`](gpu/relaysplit_live.py) — `/demo` serves the live page flagged
+  to auto-separate a baked public-domain track; `/demo-track` serves the clip.
+- **(c)** The brief's #1 demo-safety feature: an interviewer opens one link, clicks once, and hears
+  live separation with no setup — the link is never empty.
+- **(d)** *"There's a one-click always-on demo so the link is never dead — it separates a baked
+  track live on the GPU, no mic or file needed."*
+
+### ✅ Accounts / sessions / channels (control-plane data layer)
+- **(b)** [`server/src/db.ts`](server/src/db.ts), [`auth.ts`](server/src/auth.ts),
+  [`accounts.ts`](server/src/accounts.ts) — SQLite + scrypt passwords + opaque server-side session
+  tokens; `/api/register|login|me|peers|channels`; `/ws` ties a peer to its account via token.
+  Verified live (register → token → channel CRUD → 401 without token).
+- **(c)** The persistent half of the control plane (presence stays in-memory). Sessions are
+  revocable server-side; passwords are scrypt-hashed with the Node stdlib (no dependency).
+- **(d)** *"Accounts are scrypt-hashed with revocable server-side sessions — the same session model
+  that mints the ephemeral TURN credentials."*
+
+### 🟡 C++ / JUCE plugin — foundation builds (Phase 1); WebRTC client = Phase 2 (designed, DAW-gated)
 - **(b)** [`plugin/`](plugin/) — JUCE plugin (VST3 + Standalone) built with CMake + MSVC 2026.
 - **(c)** Proves the JD's C++/JUCE, cross-platform CMake build, and VST/AU/AAX-formats lines with a
   real artifact. `processBlock` is real-time-safe (passthrough now; Phase 2 does only lock-free FIFO
@@ -130,12 +148,15 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
 - **(d)** *"It's a JUCE plugin that builds as VST3 and Standalone; the audio callback never blocks —
   networking and inference run off-thread across lock-free FIFOs."*
 
-### ⏳ Still to build — VPS `/ws` session model · accounts/hub/receiver · plugin WebRTC client
-- The live (browser) demo uses self-contained signalling; next is joining the container to the VPS
-  `/ws` as a proper session peer, then the account/peer/channel/hub system, then the plugin's WebRTC
-  client (libdatachannel + Opus). **Interview-honest:** "transport, control plane, GPU model, and
-  the live round-trip with a latency meter all work; the session/account layer and the plugin's
-  WebRTC client are the next slices."
+### ⏳ Remaining — plugin WebRTC client · container↔VPS `/ws` session · hub/receiver UI
+- The **plugin's WebRTC client** (libdatachannel + Opus) is designed + documented but blocked on a
+  native dependency build (libsrtp can't find the bundled mbedTLS) and is DAW-gated — see
+  [`plugin/PHASE2.md`](plugin/PHASE2.md) for the architecture, the exact blocker, and fixes.
+  Also remaining: wiring the live container to the VPS `/ws` as a session peer (it uses
+  self-contained signalling today), and a receiver/hub/sharing UI on the account system.
+- **Interview-honest:** "the live round-trip, control plane *including accounts*, GPU model, latency
+  meter, and a one-click always-on demo all work and are deployed; the native plugin client is
+  architected and documented but needs the WebRTC library built and DAW testing."
 
 ---
 
