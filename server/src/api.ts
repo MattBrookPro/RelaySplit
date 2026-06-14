@@ -1,5 +1,6 @@
 import express from "express";
 import path from "node:path";
+import { config } from "./config";
 import { mintTurnCredential } from "./turn";
 import { listRooms } from "./presence";
 import { createAccountsRouter } from "./accounts";
@@ -27,6 +28,17 @@ export function createApi(): express.Express {
   // Presence snapshot for a control UI: which sessions are live and who's in them.
   app.get("/api/presence", (_req, res) => {
     res.json({ rooms: listRooms() });
+  });
+
+  // Which GPU broadcasts are on air right now. Proxied from the container so the browser app can poll
+  // liveness same-origin (no CORS), and the receiver list only shows genuinely live sources.
+  app.get("/api/live", async (_req, res) => {
+    try {
+      const r = await fetch(config.liveUrl + "/live");
+      res.json(await r.json());
+    } catch {
+      res.json({ broadcasts: [] });
+    }
   });
 
   // Accounts / peers / channels (SQLite-backed): /api/register, /login, /me, /peers, /channels.

@@ -337,6 +337,8 @@ function poll(){
 }
 function stop(){clearInterval(statsTimer);statsTimer=null;if(pc)pc.close();$("stop").disabled=true;$("start").disabled=false;log("stopped")}
 $("start").onclick=start;$("stop").onclick=stop;
+// Embedded in the web app (iframe with allow="autoplay") -> auto-tune so the parent's Listen toggle just works.
+if(new URLSearchParams(location.search).get("auto"))start();
 </script></body></html>
 """
 

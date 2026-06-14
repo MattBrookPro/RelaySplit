@@ -51,11 +51,13 @@
         <span>Signed in as <b id="who"></b></span>
         <button id="logout" class="sec">Log out</button>
       </div>
-      <p style="margin:14px 0 6px">Hear it live — clean music in, isolated vocal back through the GPU:</p>
-      <div class="row">
-        <a class="cta" id="liveLink" target="_blank">▶ Open the live separator</a>
-        <a class="cta" id="demoLink" target="_blank" style="background:#2a2f3a;color:#fff">One-click demo</a>
-      </div>
+    </div>
+
+    <div class="card">
+      <h2>Listen — live broadcasts right now</h2>
+      <p class="muted" style="margin:0 0 12px">Tune into any broadcast shared with you, or your own when you're broadcasting. Only sources that are live appear here.</p>
+      <div id="listenList" class="muted">—</div>
+      <div id="listenPanel"></div>
     </div>
 
     <div class="card">
@@ -79,10 +81,6 @@
       </div>
     </div>
 
-    <div class="card">
-      <h2>Shared with me (broadcasts I can receive)</h2>
-      <div id="shared" class="muted">—</div>
-    </div>
   </div>
 </div>
 
@@ -107,10 +105,9 @@ async function auth(kind) {
 $("loginBtn").onclick = () => auth("login");
 $("registerBtn").onclick = () => auth("register");
 $("logout").onclick = () => { localStorage.removeItem("rs_token"); location.reload(); };
-$("liveLink").href = LIVE + "/";
-$("demoLink").href = LIVE + "/demo";
 
 let myPeers = [];
+let listeningTo = null, listenTimer = null;
 
 async function showApp() {
   let me;
@@ -119,7 +116,8 @@ async function showApp() {
   $("who").textContent = me.account.username;
   await refreshPeers();
   await refreshChannels();
-  await refreshShared();
+  await refreshListen();
+  if (!listenTimer) listenTimer = setInterval(refreshListen, 4000);  // keep the live list current
 }
 
 async function refreshPeers() {
@@ -146,7 +144,7 @@ async function refreshChannels() {
     head.className = "row";
     head.style.justifyContent = "space-between";
     head.innerHTML = `<span><b>${c.name}</b> <span class="pill">${c.stem}</span></span>`
-      + `<a class="cta" style="padding:4px 11px;font-size:12px" target="_blank" href="${LIVE}/?channel=${c.id}">▶ Broadcast this</a>`;
+      + `<a class="cta" style="padding:4px 11px;font-size:12px" target="_blank" href="${LIVE}/?channel=${c.id}">Broadcast this</a>`;
     div.appendChild(head);
     const chips = document.createElement("div");
     chips.className = "row";
@@ -173,15 +171,51 @@ $("chAdd").onclick = async () => {
   $("chName").value = ""; await refreshChannels();
 };
 
-async function refreshShared() {
-  try {
-    const { channels } = await api("/shared-with-me");
-    $("shared").innerHTML = channels.length
-      ? channels.map((c) => `<div class="chan row" style="justify-content:space-between">`
-          + `<span><b>${c.name}</b> <span class="pill">${c.stem}</span> <span class="muted">from ${c.owner}</span></span>`
-          + `<a class="cta" style="padding:4px 11px;font-size:12px" target="_blank" href="${LIVE}/listen?channel=${c.id}">▶ Tune in</a></div>`).join("")
-      : "nothing shared with you yet";
-  } catch { $("shared").textContent = "—"; }
+// The Listen list = (my channels + channels shared with me) intersected with what's actually live on
+// the GPU right now, so a broadcaster going away makes its entry disappear. Clicking Listen embeds the
+// container's receiver page (same-origin to the GPU, so its /subscribe + autoplay just work).
+async function refreshListen() {
+  let mine = [], shared = [], live = { broadcasts: [] };
+  try { mine = (await api("/channels")).channels; } catch {}
+  try { shared = (await api("/shared-with-me")).channels; } catch {}
+  try { live = await api("/live"); } catch {}
+  const liveSet = new Set((live.broadcasts || []).filter((b) => b.live).map((b) => String(b.channel)));
+
+  const rows = [];
+  for (const c of mine)   if (liveSet.has(String(c.id))) rows.push({ id: c.id, name: c.name, who: "your broadcast" });
+  for (const c of shared) if (liveSet.has(String(c.id))) rows.push({ id: c.id, name: c.name, who: "from " + c.owner });
+
+  // If we're listening to something that just went offline, tear the player down.
+  if (listeningTo && !liveSet.has(String(listeningTo))) stopListening();
+
+  const box = $("listenList");
+  if (!rows.length) { box.innerHTML = "<span class='muted'>no live broadcasts right now</span>"; return; }
+  box.innerHTML = "";
+  for (const r of rows) {
+    const on = listeningTo === r.id;
+    const row = document.createElement("div");
+    row.className = "chan row";
+    row.style.justifyContent = "space-between";
+    row.innerHTML = `<span><b>${r.name}</b> <span class="muted">${r.who}</span></span>`;
+    const btn = document.createElement("button");
+    btn.textContent = on ? "Stop" : "Listen";
+    if (on) btn.className = "sec";
+    btn.onclick = () => (on ? stopListening() : startListening(r.id));
+    row.appendChild(btn);
+    box.appendChild(row);
+  }
+}
+function startListening(id) {
+  listeningTo = id;
+  $("listenPanel").innerHTML =
+    `<iframe src="${LIVE}/listen?channel=${id}&auto=1" allow="autoplay" `
+    + `style="width:100%;height:240px;border:1px solid #2d323c;border-radius:8px;margin-top:14px"></iframe>`;
+  refreshListen();
+}
+function stopListening() {
+  listeningTo = null;
+  $("listenPanel").innerHTML = "";
+  refreshListen();
 }
 
 showApp();

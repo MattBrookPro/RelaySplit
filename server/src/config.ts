@@ -24,4 +24,7 @@ export const config = {
   turnSecret: required("TURN_SECRET"),
   turnRealm: process.env.TURN_REALM ?? "relaysplit.vaguelystrange.com",
   turnHost: process.env.TURN_HOST ?? "relaysplit.vaguelystrange.com",
+  // The GPU container, used to report which broadcasts are live (proxied so the browser app doesn't
+  // make a cross-origin call to *.modal.run).
+  liveUrl: process.env.LIVE_URL ?? "https://blitzncs--relaysplit-live-web.modal.run",
 };

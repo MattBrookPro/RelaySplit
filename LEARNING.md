@@ -190,15 +190,24 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
   with its own read cursor that locks to the live edge. aiortc tracks are single-consumer, so this
   one-producer / many-cursor split is exactly what lets a separated stream fan out.
 - **Endpoints:** `POST /offer {channel}` (sender feeds a named broadcast + monitors), `POST /subscribe
-  {channel}` (receiver, Modal-direct downlink, no uplink), `GET /listen?channel=` (a tune-in page),
-  `GET /live` (what's on air). The web app wires **▶ Broadcast this** on each owned channel and
-  **▶ Tune in** on each *shared-with-me* entry ([`server/public/index.html`](server/public/index.html)).
-  The VPS `/ws` path is channel/`recv`-aware too, so receivers can also signal through the control plane.
+  {channel}` (receiver, Modal-direct downlink, no uplink), `GET /listen?channel=[&auto=1]` (a tune-in
+  page), `GET /live` (what's on air). The web app shows a **Listen** card ([`server/public/index.html`](server/public/index.html)):
+  the union of my channels + shared-with-me, **intersected with `/api/live`** so only genuinely-live
+  sources appear (a stopped broadcaster drops out within a poll); clicking Listen embeds the container's
+  `/listen` receiver inline. `GET /api/live` proxies the container's `/live` so the browser stays
+  same-origin. The VPS `/ws` path is channel/`recv`-aware too.
 - **(c)** Demonstrates an SFU-shaped design without a full SFU: the GPU does the work once and the
   result is multicast to listeners over best-path WebRTC (direct/srflx/TURN per peer).
 - **(d)** *Verified end-to-end in-browser:* a sender looping the demo track on a channel + a separate
   receiver subscribing to it → receiver got the **separated vocal** (sustained RMS ≈ 0.10, peak ≈ 0.49),
   live inference ≈ 150 ms, `/live` showing `subscribers: 2` (monitor + receiver) on one live broadcast.
+  The web Listen toggle was also verified live: a broadcast appears as "your broadcast", embeds + plays
+  (`srflx/srflx`, connected), and **depopulates** when the broadcaster stops (auto-tearing the player).
+- **UX pass (responsiveness & clarity):** plugin Connect/Disconnect is now instant — `connect()` flags a
+  `Connecting` state up front and `disconnect()` hands the worker join to a detached thread (FIFOs are
+  `shared_ptr`, so a dying worker can't outlive its buffers); login **persists** to disk and a stale
+  token self-clears on a 401; the receiver list shows only `/live` sources (refreshed off-thread); and
+  non-ASCII glyphs that rendered as tofu were removed.
 
 ### ⏳ Remaining — plugin DAW audio listen · coturn relay-to-self
 - The plugin **builds** with its WebRTC client, **assigns peers** (session-aware matrix), and now has
