@@ -8,11 +8,16 @@ RelaySplitProcessor::RelaySplitProcessor()
 {
 }
 
-void RelaySplitProcessor::prepareToPlay (double, int) {}
+RelaySplitProcessor::~RelaySplitProcessor() { disconnect(); }
+
+void RelaySplitProcessor::prepareToPlay (double, int samplesPerBlock)
+{
+    scratchFrames = juce::jmax (samplesPerBlock, 4096);
+    scratch.allocate ((size_t) scratchFrames * 2, true);  // interleaved L,R staging
+}
 
 bool RelaySplitProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
-    // Stereo in / stereo out — matches the Demucs path on the GPU.
     return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo()
         && layouts.getMainInputChannelSet()  == juce::AudioChannelSet::stereo();
 }
@@ -20,21 +25,42 @@ bool RelaySplitProcessor::isBusesLayoutSupported (const BusesLayout& layouts) co
 void RelaySplitProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
+    const int n = buffer.getNumSamples();
 
-    // Phase 1: passthrough. Phase 2 replaces this with two lock-free FIFO copies only:
-    //   - write `buffer` (the clean input) to the to-network FIFO,
-    //   - overwrite `buffer` with separated audio read from the from-network FIFO.
-    // No allocation / locking / sockets on this thread — the network + Opus + WebRTC run elsewhere.
-    juce::ignoreUnused (buffer);
+    // Not connected → passthrough (leave the buffer as-is). This keeps the plugin transparent
+    // until the user hits Connect.
+    if (client == nullptr || n > scratchFrames)
+        return;
+
+    float* l = buffer.getWritePointer (0);
+    float* r = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : l;
+
+    // (a) interleave the clean input into the to-network FIFO (the WebRtcClient encodes + sends it).
+    for (int i = 0; i < n; ++i) { scratch[(size_t) i * 2] = l[i]; scratch[(size_t) i * 2 + 1] = r[i]; }
+    toNetwork.push (scratch, n);
+
+    // (b) replace the output with the separated audio coming back; silence on underrun (warming up).
+    const int got = fromNetwork.pop (scratch, n);
+    for (int i = 0; i < got; ++i) { l[i] = scratch[(size_t) i * 2]; r[i] = scratch[(size_t) i * 2 + 1]; }
+    for (int i = got; i < n; ++i) { l[i] = 0.0f; r[i] = 0.0f; }
 }
 
-juce::AudioProcessorEditor* RelaySplitProcessor::createEditor()
+void RelaySplitProcessor::connect()
 {
-    return new RelaySplitEditor (*this);
+    if (client == nullptr)
+        client = std::make_unique<WebRtcClient> (toNetwork, fromNetwork);
+    client->connect (kLiveUrl);
 }
 
-// JUCE plugin entry point.
-juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+void RelaySplitProcessor::disconnect()
 {
-    return new RelaySplitProcessor();
+    if (client != nullptr)
+    {
+        client->disconnect();
+        client.reset();
+    }
 }
+
+juce::AudioProcessorEditor* RelaySplitProcessor::createEditor() { return new RelaySplitEditor (*this); }
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new RelaySplitProcessor(); }

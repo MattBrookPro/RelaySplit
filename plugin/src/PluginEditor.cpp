@@ -14,9 +14,8 @@ RelaySplitEditor::RelaySplitEditor (RelaySplitProcessor& p)
 
     connectButton.onClick = [this]
     {
-        // Phase 2: start/stop the WebRTC session against the Modal container.
-        // Phase 1 stub just toggles the flag so the UI is exercised.
-        proc.connected = ! proc.connected.load();
+        if (proc.isConnected()) proc.disconnect();
+        else                    proc.connect();
     };
     addAndMakeVisible (connectButton);
 
@@ -44,9 +43,9 @@ void RelaySplitEditor::resized()
 
 void RelaySplitEditor::timerCallback()
 {
-    const bool c = proc.connected.load();
+    const bool c = proc.isConnected();
     statusLabel.setText (c ? "connected" : "disconnected", juce::dontSendNotification);
-    rttLabel.setText ("net RTT: "   + juce::String (proc.netRttMs.load(),    0) + " ms", juce::dontSendNotification);
-    infLabel.setText ("inference: " + juce::String (proc.inferenceMs.load(), 0) + " ms", juce::dontSendNotification);
+    rttLabel.setText ("net RTT: "   + juce::String (proc.rttMs(),       0) + " ms", juce::dontSendNotification);
+    infLabel.setText ("inference: " + juce::String (proc.inferenceMs(), 0) + " ms", juce::dontSendNotification);
     connectButton.setButtonText (c ? "Disconnect" : "Connect");
 }

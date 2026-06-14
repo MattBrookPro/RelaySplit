@@ -16,10 +16,11 @@ FetchContent_Declare(JUCE
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(JUCE)
 
-# Phase 2 (the native WebRTC client) needs libdatachannel + Opus. Wiring those in hit a real
-# dependency-integration blocker on this toolchain (CMake 4.2 + libdatachannel's bundled libsrtp
-# can't find the bundled mbedTLS via find_package). It's documented with resolution options in
-# PHASE2.md and kept OUT of the default build so the plugin foundation always builds cleanly.
+# WebRTC stack via vcpkg: libdatachannel built with the srtp/media feature + OpenSSL (sidesteps the
+# bundled-mbedTLS/libsrtp wall hit by FetchContent). Configure with the vcpkg toolchain, e.g.:
+#   -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+find_package(LibDataChannel CONFIG REQUIRED)
+find_package(Opus CONFIG REQUIRED)
 
 juce_add_plugin(RelaySplit
     PRODUCT_NAME "RelaySplit"
@@ -30,21 +31,32 @@ juce_add_plugin(RelaySplit
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
+    VST3_AUTO_MANIFEST FALSE  # skip the load-to-generate moduleinfo step (it can't find the vcpkg DLLs)
     COPY_PLUGIN_AFTER_BUILD FALSE)
 
 target_sources(RelaySplit PRIVATE
     src/PluginProcessor.cpp
-    src/PluginEditor.cpp)
+    src/PluginEditor.cpp
+    src/WebRtcClient.cpp)
 
 target_compile_definitions(RelaySplit PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
-    JUCE_VST3_CAN_REPLACE_VST2=0)
+    JUCE_VST3_CAN_REPLACE_VST2=0
+    RTC_ENABLE_MEDIA=1)
 
 target_link_libraries(RelaySplit
     PRIVATE
         juce::juce_audio_utils
         juce::juce_dsp
+        LibDataChannel::LibDataChannel
+        Opus::opus
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
+
+# libdatachannel.dll exports std::vector<std::byte> symbols that also live in juce_core.obj — the
+# same instantiation, so let the linker pick one (propagates to the VST3/Standalone exe links).
+if (MSVC)
+    target_link_options(RelaySplit INTERFACE "/FORCE:MULTIPLE")
+endif()
