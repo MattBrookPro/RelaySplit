@@ -16,6 +16,11 @@ FetchContent_Declare(JUCE
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(JUCE)
 
+# Phase 2 (the native WebRTC client) needs libdatachannel + Opus. Wiring those in hit a real
+# dependency-integration blocker on this toolchain (CMake 4.2 + libdatachannel's bundled libsrtp
+# can't find the bundled mbedTLS via find_package). It's documented with resolution options in
+# PHASE2.md and kept OUT of the default build so the plugin foundation always builds cleanly.
+
 juce_add_plugin(RelaySplit
     PRODUCT_NAME "RelaySplit"
     COMPANY_NAME "MattBrookPro"
