@@ -122,6 +122,26 @@ export function createAccountsRouter(): express.Router {
     res.json({ ok: true });
   });
 
+  // Replace a channel's entire peer set in one call (the plugin assigns "any number of peers").
+  r.post("/channels/:id/shares", (req, res) => {
+    const acct = requireAuth(req, res);
+    if (!acct) return;
+    const channelId = Number(req.params.id);
+    if (!ownChannel(acct, channelId)) return res.status(404).json({ error: "no such channel" });
+    const requested: number[] = Array.isArray(req.body?.peerIds) ? req.body.peerIds.map(Number) : [];
+    const myPeers = new Set(
+      (db.prepare("SELECT peer_id FROM peers WHERE account_id = ?").all(acct.id) as { peer_id: number }[]).map((r) => r.peer_id),
+    );
+    const valid = requested.filter((id) => myPeers.has(id));
+    const replace = db.transaction((ids: number[]) => {
+      db.prepare("DELETE FROM shares WHERE channel_id = ?").run(channelId);
+      const ins = db.prepare("INSERT OR IGNORE INTO shares (channel_id, account_id) VALUES (?, ?)");
+      for (const id of ids) ins.run(channelId, id);
+    });
+    replace(valid);
+    res.json({ ok: true, shared: valid });
+  });
+
   // Broadcasts other people have shared WITH me (what I can receive).
   r.get("/shared-with-me", (req, res) => {
     const acct = requireAuth(req, res);

@@ -37,7 +37,9 @@ juce_add_plugin(RelaySplit
 target_sources(RelaySplit PRIVATE
     src/PluginProcessor.cpp
     src/PluginEditor.cpp
-    src/WebRtcClient.cpp)
+    src/WebRtcClient.cpp
+    src/ControlClient.cpp
+    src/InstanceRegistry.cpp)
 
 target_compile_definitions(RelaySplit PUBLIC
     JUCE_WEB_BROWSER=0

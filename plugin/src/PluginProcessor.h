@@ -1,8 +1,11 @@
 #pragma once
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <memory>
+#include <set>
 #include "StereoFifo.h"
 #include "WebRtcClient.h"
+#include "ControlClient.h"
+#include "InstanceRegistry.h"
 
 // RelaySplit plugin processor. Captures the track's audio, ships it to the Modal GPU over WebRTC,
 // and plays back the separated vocal — with a live latency meter.
@@ -46,10 +49,24 @@ public:
     // The deployed live separator container (self-contained /offer signalling path).
     static constexpr const char* kLiveUrl = "https://blitzncs--relaysplit-live-web.modal.run";
 
+    // Session / peer assignment (control plane). Instances in one DAW share a process; the
+    // InstanceRegistry makes them session-aware so any editor can assign peers across siblings.
+    juce::String getInstanceName() const { return instanceName; }
+    void setInstanceName (const juce::String& n);
+    const std::set<int>& getAssignedPeers() const { return assignedPeers; }
+    void setAssignedPeers (std::set<int> peers);   // creates the channel if needed, syncs shares
+    bool isGroupSelected() const { return groupSelected; }
+    void setGroupSelected (bool b);
+
 private:
     StereoFifo toNetwork   { 96000 };  // ~2 s at 48 kHz
     StereoFifo fromNetwork { 96000 };
     std::unique_ptr<WebRtcClient> client;
+
+    juce::String instanceName;
+    int channelId = 0;
+    std::set<int> assignedPeers;
+    bool groupSelected = false;
 
     juce::HeapBlock<float> scratch;    // interleave/deinterleave staging, sized in prepareToPlay
     int scratchFrames = 0;

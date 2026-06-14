@@ -1,14 +1,47 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <atomic>
+
+static std::atomic<int> instanceCounter { 0 };
 
 RelaySplitProcessor::RelaySplitProcessor()
     : AudioProcessor (BusesProperties()
           .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
           .withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
+    instanceName = "RelaySplit " + juce::String (++instanceCounter);
+    InstanceRegistry::get().add (this);
 }
 
-RelaySplitProcessor::~RelaySplitProcessor() { disconnect(); }
+RelaySplitProcessor::~RelaySplitProcessor()
+{
+    InstanceRegistry::get().remove (this);
+    disconnect();
+}
+
+void RelaySplitProcessor::setInstanceName (const juce::String& n)
+{
+    instanceName = n;
+    InstanceRegistry::get().sendChangeMessage();
+}
+
+void RelaySplitProcessor::setGroupSelected (bool b)
+{
+    groupSelected = b;
+    InstanceRegistry::get().sendChangeMessage();
+}
+
+void RelaySplitProcessor::setAssignedPeers (std::set<int> peers)
+{
+    assignedPeers = std::move (peers);
+    auto& cc = ControlClient::get();
+    if (cc.isLoggedIn())
+    {
+        if (channelId == 0) channelId = cc.createChannel (instanceName);  // lazily create this instance's channel
+        if (channelId != 0) cc.setShares (channelId, assignedPeers);
+    }
+    InstanceRegistry::get().sendChangeMessage();
+}
 
 void RelaySplitProcessor::prepareToPlay (double, int samplesPerBlock)
 {
