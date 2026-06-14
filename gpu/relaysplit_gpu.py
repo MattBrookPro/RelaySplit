@@ -391,6 +391,87 @@ def main():
     print(json.dumps(Separator().benchmark.remote(), indent=2))
 
 
+# --- Multi-GPU forward-time bench (no region pin = best availability; each call is BOUNDED and
+# cancelled on timeout so an unavailable GPU can't hang/loop). Run foreground: modal run ...::gpubench
+def _bench_forward(label):
+    import statistics
+    import time
+
+    import numpy as np
+    import torch
+    from demucs.apply import apply_model
+    from demucs.pretrained import get_model
+
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    name = torch.cuda.get_device_name(0) if dev == "cuda" else "cpu"
+    model = get_model(MODEL_NAME).to(dev).eval()
+    sr = int(model.samplerate)
+    wav = torch.from_numpy((0.1 * np.random.randn(2, int((CONTEXT_S + CHUNK_S) * sr))).astype("float32")).to(dev)
+    ref = wav.mean(0)
+    x = ((wav - ref.mean()) / (ref.std() + 1e-8))[None]
+
+    def fwd():
+        with torch.no_grad():
+            if dev == "cuda":
+                with torch.autocast("cuda", dtype=torch.float16):
+                    apply_model(model, x, split=False, device=dev)
+                torch.cuda.synchronize()
+            else:
+                apply_model(model, x, split=False, device=dev)
+
+    for _ in range(5):
+        fwd()
+    ts = []
+    for _ in range(9):
+        t0 = time.perf_counter()
+        fwd()
+        ts.append((time.perf_counter() - t0) * 1000)
+    return {"gpu": label, "device": name, "forward_ms": round(statistics.median(ts), 1),
+            "min_ms": round(min(ts), 1), "max_ms": round(max(ts), 1)}
+
+
+@app.function(image=image, gpu="L4", timeout=180)
+def bench_l4():
+    return _bench_forward("L4")
+
+
+@app.function(image=image, gpu="A10G", timeout=180)
+def bench_a10g():
+    return _bench_forward("A10G")
+
+
+@app.function(image=image, gpu="L40S", timeout=180)
+def bench_l40s():
+    return _bench_forward("L40S")
+
+
+@app.function(image=image, gpu="A100", timeout=180)
+def bench_a100():
+    return _bench_forward("A100")
+
+
+@app.local_entrypoint()
+def gpubench():
+    fns = [("L4", bench_l4), ("A10G", bench_a10g), ("L40S", bench_l40s), ("A100", bench_a100)]
+    for label, fn in fns:
+        call = None
+        try:
+            call = fn.spawn()
+            res = call.get(timeout=100)  # bounded wait; if no capacity, skip rather than hang
+            print(f"{label:>6}: forward={res['forward_ms']}ms (min {res['min_ms']} / max {res['max_ms']})  [{res['device']}]")
+        except Exception as e:
+            if call is not None:
+                try:
+                    call.cancel()  # CANCEL so an unavailable GPU can't keep running/queuing
+                except Exception:
+                    pass
+            print(f"{label:>6}: SKIP ({type(e).__name__}: {str(e)[:80]})")
+
+
 @app.local_entrypoint()
 def knee():
     # Find the fp16 real-time knee: how small can the hop go while inference still beats it?

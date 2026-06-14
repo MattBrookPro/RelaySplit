@@ -348,7 +348,10 @@ if(new URLSearchParams(location.search).get("auto"))start();
 """
 
 
-@app.function(image=image, gpu=["L4", "A10G", "L40S", "A100"], region=REGION, max_containers=1, scaledown_window=300)
+# GPU preference ordered by MEASURED htdemucs-fp16 forward time (L40S 48ms < L4 84ms < A100 93 < A10G 114 —
+# the model is small/overhead-bound, so L40S's clock beats A100's bandwidth). It's a FALLBACK LIST, so an
+# unavailable L40S in `uk` simply drops to L4 (no hang). The adaptive hop then auto-sizes to whatever we got.
+@app.function(image=image, gpu=["L40S", "L4", "A100", "A10G"], region=REGION, max_containers=1, scaledown_window=300)
 @modal.concurrent(max_inputs=12)
 @modal.asgi_app()
 def web():
