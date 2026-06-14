@@ -203,6 +203,13 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
   live inference ≈ 150 ms, `/live` showing `subscribers: 2` (monitor + receiver) on one live broadcast.
   The web Listen toggle was also verified live: a broadcast appears as "your broadcast", embeds + plays
   (`srflx/srflx`, connected), and **depopulates** when the broadcaster stops (auto-tearing the player).
+- **Real-time perf fix:** inference wall-clock had crept to ~300 ms (fp32 + event-loop/GIL contention),
+  past the 250 ms chunk hop → the stream starved and audio turned jumpy. Fixed on the GPU side: **fp16
+  autocast + TF32 + cudnn.benchmark** (with a startup warmup) and a **single-thread executor** so all
+  separations serialise on the one GPU. Back to **~120 ms, stable** (117–124). Added a **150 ms jitter
+  buffer** to each `FanoutTrack` (lock on ~150 ms behind live, not at the bare edge) so bursty per-chunk
+  production can't starve the steady 20 ms reads. Lesson: the measured "inference" is wall-clock around
+  the executor, so it doubles as a thermometer for event-loop health, not just GPU compute.
 - **UX pass (responsiveness & clarity):** plugin Connect/Disconnect is now instant — `connect()` flags a
   `Connecting` state up front and `disconnect()` hands the worker join to a detached thread (FIFOs are
   `shared_ptr`, so a dying worker can't outlive its buffers); login **persists** to disk and a stale

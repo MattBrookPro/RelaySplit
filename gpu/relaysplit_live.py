@@ -369,10 +369,24 @@ def web():
     log = logging.getLogger("relaysplit-live")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        # Headroom matters: the chunk hop is 250 ms, so inference must stay well under that or the
+        # real-time stream starves and the audio turns jumpy. TF32 + fp16 autocast roughly halve the
+        # conv cost on the L4/Ada (and A10G/L40S/A100) with no audible quality change; cudnn.benchmark
+        # picks the fastest kernels for our (now steady) segment size.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
     model = get_model(MODEL_NAME).to(device).eval()
     sources = list(model.sources)
     voc_idx = sources.index("vocals")
     log.info("model loaded on %s; sources=%s", device, sources)
+
+    # All inference goes through ONE worker thread: a single GPU can't truly run two separations at
+    # once, so serialising avoids thrash when several broadcasts are live (each would otherwise launch
+    # its own concurrent apply_model). It also keeps GPU work off the event loop entirely.
+    from concurrent.futures import ThreadPoolExecutor
+    gpu_exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="demucs")
 
     def sep_voc(seg_np):
         seg = torch.from_numpy(np.ascontiguousarray(seg_np))
@@ -380,8 +394,21 @@ def web():
         mean, std = ref.mean(), ref.std() + 1e-8
         x = (seg - mean) / std
         with torch.no_grad():
-            out = apply_model(model, x[None].to(device), split=False, device=device)[0]
-        return (out * std + mean)[voc_idx].cpu().numpy()
+            if device == "cuda":
+                with torch.autocast("cuda", dtype=torch.float16):
+                    out = apply_model(model, x[None].to(device), split=False, device=device)[0]
+            else:
+                out = apply_model(model, x[None].to(device), split=False, device=device)[0]
+        return (out.float() * std + mean)[voc_idx].cpu().numpy()
+
+    if device == "cuda":  # warm the kernels (cudnn.benchmark + autocast) so the first chunks aren't slow
+        try:
+            for _ in range(2):
+                sep_voc(np.zeros((2, int(CONTEXT_S * MODEL_SR)), dtype="float32"))
+            torch.cuda.synchronize()
+            log.info("gpu warmup done")
+        except Exception as e:
+            log.warning("gpu warmup failed: %s", e)
 
     def get_ice():
         try:
@@ -455,7 +482,7 @@ def web():
                     for rf in self.r_in.resample(frame):
                         self.sep.push(rf.to_ndarray())  # (2, n) float32 @ 44.1k
                     t0 = time.perf_counter()
-                    blocks = await loop.run_in_executor(None, self.sep.pop)  # GPU off the loop
+                    blocks = await loop.run_in_executor(gpu_exec, self.sep.pop)  # serialised GPU, off the loop
                     if blocks:
                         self.infer_ms = (time.perf_counter() - t0) * 1000 / len(blocks)
                         ch = self.box.get("dc")
@@ -521,15 +548,16 @@ def web():
             if wait > 0:
                 await asyncio.sleep(wait)
             out = None
-            async with self.bc.lock:
+            JITTER = int(0.15 * WEBRTC_SR)  # play ~150 ms behind live so bursty per-chunk production
+            async with self.bc.lock:                                # can't starve the steady 20 ms reads
                 w, b = self.bc.write, self.bc.base
-                if self.cursor is None and w > 0:
-                    self.cursor = w  # first audio: lock onto the live edge (don't replay history)
+                if self.cursor is None and (w - b) >= JITTER:
+                    self.cursor = w - JITTER  # lock on once a cushion exists (not at the bare live edge)
                 if self.cursor is not None:
                     if self.cursor < b:
                         self.cursor = b  # we fell off the trimmed history — jump to oldest kept
                     if w - self.cursor > WEBRTC_SR // 2:
-                        self.cursor = max(b, w - n)  # >0.5 s behind: resync near live
+                        self.cursor = max(b, w - JITTER)  # >0.5 s behind: resync, keeping the cushion
                     if w - self.cursor >= n:
                         off = self.cursor - b
                         out = self.bc.buf[:, off:off + n].copy()
