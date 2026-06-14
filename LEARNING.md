@@ -104,16 +104,26 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
   latency. The GPU is genuinely required now; the light model was marginal on CPU and the heavy one
   is impossible there."*
 
-### 🟡 Full latency story (instrumentation) — *control-plane half done; meter is ⏳*
-- TURN/region/warm-start are in place conceptually; the live network-RTT-vs-inference **meter** is
-  not built yet (data-plane work). Don't claim the meter until step 6 lands.
+### ✅ Live WebRTC ↔ GPU separation + latency meter (the headline demo)
+- **(b)** [`gpu/relaysplit_live.py`](gpu/relaysplit_live.py) — a warm UK GPU container is an aiortc
+  WebRTC peer: inbound 48 kHz audio → stateful resample to 44.1 kHz → `OnlineSeparator` (Demucs) →
+  resample to 48 kHz → outbound track; Demucs inference runs off the event loop. ICE/TURN comes
+  from the deployed control plane (`/ice` → VPS `/api/turn`). The page shows net RTT (getStats) +
+  per-chunk inference (data channel).
+- **(c)** The whole thesis, working: play music into the browser, hear ONLY the isolated vocal back,
+  separated live on a cloud GPU, with the latency on screen. Confirmed end-to-end. The intricate
+  part was the real-time glue — stateful 48k↔44.1k resampling and decoupling GPU inference from the
+  WebRTC frame clock so audio never stalls.
+- **(d)** *"Audio runs over WebRTC to a warm GPU, the vocal is separated by a streaming model, and
+  it comes back in real time — and I show the measured network RTT and inference time on screen, so
+  the latency is owned, not hidden."*
 
-### ⏳ C++ / JUCE plugin · audio-thread discipline · live latency meter · real-time aiortc wiring
-- Not built yet. Planned per the brief's spine (steps 3–4, 6). The model is proven on the GPU; the
-  next data-plane slice wires it into an aiortc track (resample 48k↔8k, block + overlap-add, emit
-  the vocal stem) so live audio is separated through the container. **Interview-honest:** "the
-  transport, control plane, and GPU model are all proven and live; the plugin and the real-time
-  audio glue are the next slices."
+### ⏳ Still to build — VPS `/ws` session model · accounts/hub/receiver · JUCE plugin
+- The live demo uses self-contained signalling; next is joining the container to the VPS `/ws` as a
+  proper session peer, then the account/peer/channel/hub system, then the JUCE plugin (C++,
+  lock-free audio thread) as a native client. **Interview-honest:** "transport, control plane, GPU
+  model, and the live round-trip with a latency meter all work; the session/account layer and the
+  native plugin are the next slices."
 
 ---
 
