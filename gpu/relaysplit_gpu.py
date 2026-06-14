@@ -26,12 +26,12 @@ import modal
 REGION = "uk"  # confirmed latency-critical pin (docs/setup-machine2.md)
 MODEL_NAME = "htdemucs"  # Demucs v4; sources: drums, bass, other, vocals
 
-# Chosen streaming config (confirmed by listening): 0.25 s chunk + 5 s past context + short
-# crossfade. chunk = algorithmic latency; context is free (already-captured past audio); fade is a
-# small future-lookahead that removes the click at block edges.
-CHUNK_S = 0.25
+# Chosen streaming config: 0.1 s chunk + 5 s past context + short crossfade. chunk = algorithmic
+# latency; context is FREE (inference is ~81 ms flat regardless of segment length on L4/fp16 — see
+# `knee`), so keep it large for quality. fade is a small future-lookahead that removes block-edge clicks.
+CHUNK_S = 0.1
 CONTEXT_S = 5.0
-FADE_S = 0.02
+FADE_S = 0.01
 
 
 class OnlineSeparator:
@@ -123,6 +123,10 @@ class Separator:
 
         self.torch = torch
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if self.device == "cuda":  # match the live container's fast path
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cudnn.benchmark = True
         self.model = get_model(MODEL_NAME).to(self.device)
         self.model.eval()
         self.sr = int(self.model.samplerate)  # 44100
@@ -174,10 +178,12 @@ class Separator:
         torch = self.torch
         x = (seg - mean) / std
         with torch.no_grad():
-            out = apply_model(
-                self.model, x[None].to(self.device), split=split, overlap=0.1, device=self.device
-            )[0]
-        return out * std + mean
+            if self.device == "cuda":
+                with torch.autocast("cuda", dtype=torch.float16):
+                    out = apply_model(self.model, x[None].to(self.device), split=split, overlap=0.1, device=self.device)[0]
+            else:
+                out = apply_model(self.model, x[None].to(self.device), split=split, overlap=0.1, device=self.device)[0]
+        return out.float() * std + mean
 
     def _stream_vocals(self, wav, chunk_s, context_s, fade_s=FADE_S):
         """Simulate the live path: emit vocals block-by-block using PAST context, with a short
@@ -247,6 +253,44 @@ class Separator:
             dt = time.perf_counter() - t0
             out["chunks"].append({"chunk_s": cs, "infer_ms": round(dt * 1000, 1), "rtf": round(dt / cs, 3)})
         return out
+
+    @modal.method()
+    def knee_sweep(self, configs, fade_s: float = 0.01, reps: int = 7):
+        """The latency-assault measurement: for each (hop_s, context_s), time the fp16 inference on a
+        representative steady-state segment (context+hop+fade) and report whether it sustains real time
+        (infer < hop) plus the GPU utilisation it implies. Timing is content-independent, so noise is
+        fine here; quality at the chosen config is judged separately on real audio."""
+        import time
+
+        import numpy as np
+
+        max_seg = 7.6
+        res = []
+        for hop_s, ctx_s in configs:
+            seg_s = min(ctx_s + hop_s + fade_s, max_seg)
+            n = int(seg_s * self.sr)
+            wav = self.torch.from_numpy((0.1 * np.random.randn(self.channels, n)).astype("float32"))
+            ref = wav.mean(0)
+            mean, std = ref.mean(), ref.std() + 1e-8
+            for _ in range(3):  # warm the kernels for THIS shape (cudnn.benchmark)
+                self._separate_seg(wav, mean, std, split=False)
+            self._sync()
+            ts = []
+            for _ in range(reps):
+                t0 = time.perf_counter()
+                self._separate_seg(wav, mean, std, split=False)
+                self._sync()
+                ts.append((time.perf_counter() - t0) * 1000)
+            infer = sorted(ts)[len(ts) // 2]  # median
+            algo = (hop_s + fade_s) * 1000
+            res.append({
+                "hop_s": hop_s, "context_s": ctx_s, "seg_s": round(seg_s, 3),
+                "infer_ms": round(infer, 1), "algo_ms": round(algo, 1),
+                "gpu_util_pct": round(100 * infer / (hop_s * 1000), 1),
+                "rt_feasible": bool(infer < hop_s * 1000),
+                "core_latency_ms": round(algo + infer, 1),  # algo + compute; add net+jitter for end-to-end
+            })
+        return {"device": self.device, "sr": self.sr, "results": res}
 
     @modal.method()
     def separate_clip(self, audio_bytes: bytes, max_seconds: int = 30):
@@ -345,6 +389,23 @@ def main():
     import json
 
     print(json.dumps(Separator().benchmark.remote(), indent=2))
+
+
+@app.local_entrypoint()
+def knee():
+    # Find the fp16 real-time knee: how small can the hop go while inference still beats it?
+    configs = [
+        [0.25, 5.0],  # current
+        [0.10, 3.0], [0.10, 2.0], [0.10, 1.0],
+        [0.05, 2.0], [0.05, 1.0], [0.05, 0.5],
+        [0.025, 1.0], [0.025, 0.5],
+    ]
+    r = Separator().knee_sweep.remote(configs)
+    print(f"device={r['device']} sr={r['sr']}")
+    print(f"{'hop':>6} {'ctx':>5} {'seg':>5} {'infer_ms':>9} {'algo_ms':>8} {'util%':>6} {'rt':>5} {'core_ms':>8}")
+    for x in r["results"]:
+        print(f"{x['hop_s']:>6} {x['context_s']:>5} {x['seg_s']:>5} {x['infer_ms']:>9} "
+              f"{x['algo_ms']:>8} {x['gpu_util_pct']:>6} {str(x['rt_feasible']):>5} {x['core_latency_ms']:>8}")
 
 
 @app.local_entrypoint()

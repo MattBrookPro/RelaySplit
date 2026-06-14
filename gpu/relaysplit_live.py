@@ -18,7 +18,12 @@ import modal
 
 REGION = "uk"
 MODEL_NAME = "htdemucs"
-CHUNK_S, CONTEXT_S, FADE_S = 0.25, 5.0, 0.02
+# Latency (measured, fp16): htdemucs inference is ~81 ms FLAT regardless of segment length on L4 (it's
+# launch-overhead-bound, not compute-bound), so past context is genuinely FREE — keep 5 s for quality —
+# and the only latency lever is the hop. The live per-chunk cost ≈ forward + ~45 ms of aiortc/event-loop
+# overhead, so the hop is sized ADAPTIVELY at startup to whatever GPU we landed on (see web()): ~0.15 s
+# on L4, ~0.10 s on L40S/A100. CHUNK_S here is only the fallback if the startup measurement fails.
+CHUNK_S, CONTEXT_S, FADE_S = 0.15, 5.0, 0.01
 MODEL_SR, WEBRTC_SR = 44100, 48000
 TURN_ENDPOINT = "https://relaysplit.vaguelystrange.com/api/turn"
 
@@ -401,14 +406,38 @@ def web():
                 out = apply_model(model, x[None].to(device), split=False, device=device)[0]
         return (out.float() * std + mean)[voc_idx].cpu().numpy()
 
-    if device == "cuda":  # warm the kernels (cudnn.benchmark + autocast) so the first chunks aren't slow
+    # Adaptive hop: size the chunk to whatever GPU we landed on. The live per-chunk cost is
+    # forward + ~OVERHEAD (aiortc SRTP/RTP + numpy on the event loop, GPU-independent); keep the hop a
+    # safe margin above that so the stream never falls behind. Faster GPU -> smaller hop -> lower latency,
+    # automatically, while the GPU fallback list stays intact (no "waiting for GPU" risk).
+    chunk_s = CHUNK_S
+    if device == "cuda":
         try:
-            for _ in range(2):
-                sep_voc(np.zeros((2, int(CONTEXT_S * MODEL_SR)), dtype="float32"))
+            warm = np.zeros((2, int((CONTEXT_S + 0.15) * MODEL_SR)), dtype="float32")  # ~live segment shape
+            for _ in range(4):  # warm cudnn.benchmark kernels for this shape
+                sep_voc(warm)
             torch.cuda.synchronize()
-            log.info("gpu warmup done")
+            t0 = time.perf_counter()
+            for _ in range(3):
+                sep_voc(warm)  # full per-chunk cost INCLUDING the .cpu()/numpy postproc
+            torch.cuda.synchronize()
+            per_chunk_ms = (time.perf_counter() - t0) * 1000 / 3
+            # hop = ~30% above the measured per-chunk cost, so the stream never falls behind real time
+            chunk_s = min(0.25, max(0.10, round(per_chunk_ms * 1.3 / 1000, 2)))
+            # one-time breakdown (forward-only vs full) to see where the per-chunk time goes
+            wt = torch.from_numpy(warm)[None].to(device)
+            ref = wt[0].mean(0); m, s = ref.mean(), ref.std() + 1e-8
+            t1 = time.perf_counter()
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
+                _ = apply_model(model, (wt[0] - m) / s, split=False, device=device)
+            torch.cuda.synchronize()
+            fwd_only = (time.perf_counter() - t1) * 1000
+            log.info("warmup: per-chunk=%.0f ms (forward_only=%.0f ms) -> adaptive hop=%.0f ms",
+                     per_chunk_ms, fwd_only, chunk_s * 1000)
         except Exception as e:
-            log.warning("gpu warmup failed: %s", e)
+            log.warning("gpu warmup/measure failed: %s", e)
+    jitter_s = max(0.06, round(0.6 * chunk_s, 2))  # cushion < 1 hop: covers timing jitter, less latency
+    HOP_MS = int(round(chunk_s * 1000))
 
     def get_ice():
         try:
@@ -437,7 +466,7 @@ def web():
 
         def __init__(self, key):
             self.key = key
-            self.sep = OnlineSeparator(sep_voc, MODEL_SR, CHUNK_S, CONTEXT_S, FADE_S)
+            self.sep = OnlineSeparator(sep_voc, MODEL_SR, chunk_s, CONTEXT_S, FADE_S)  # adaptive hop
             self.r_in = av.AudioResampler(format="fltp", layout="stereo", rate=MODEL_SR)
             self.r_out = av.AudioResampler(format="fltp", layout="stereo", rate=WEBRTC_SR)
             self.lock = asyncio.Lock()
@@ -488,7 +517,7 @@ def web():
                         ch = self.box.get("dc")
                         if ch and ch.readyState == "open":
                             try:
-                                ch.send(json.dumps({"infer_ms": round(self.infer_ms, 1)}))
+                                ch.send(json.dumps({"infer_ms": round(self.infer_ms, 1), "hop_ms": HOP_MS}))
                             except Exception:
                                 pass
                     for blk in blocks:
@@ -548,7 +577,7 @@ def web():
             if wait > 0:
                 await asyncio.sleep(wait)
             out = None
-            JITTER = int(0.15 * WEBRTC_SR)  # play ~150 ms behind live so bursty per-chunk production
+            JITTER = int(jitter_s * WEBRTC_SR)  # play ~1 hop behind live so bursty per-chunk production
             async with self.bc.lock:                                # can't starve the steady 20 ms reads
                 w, b = self.bc.write, self.bc.base
                 if self.cursor is None and (w - b) >= JITTER:
@@ -582,7 +611,7 @@ def web():
                 ch = box.get("dc")
                 if ch and ch.readyState == "open":
                     try:
-                        ch.send(json.dumps({"infer_ms": round(bc.infer_ms, 1)}))
+                        ch.send(json.dumps({"infer_ms": round(bc.infer_ms, 1), "hop_ms": HOP_MS}))
                     except Exception:
                         pass
                 await asyncio.sleep(1)
