@@ -34,6 +34,64 @@ CONTEXT_S = 5.0
 FADE_S = 0.02
 
 
+class OnlineSeparator:
+    """Stateful, online version of the streaming separator for the LIVE path. Push inbound audio
+    `(ch, n)` at the model rate; pop emitted vocal blocks (one hop each). It keeps a rolling input
+    buffer for past context, runs Demucs on `[pos-context, pos+hop+fade]`, and linear-crossfades
+    each block's edge with the previous one (a held, faded-out tail) — the online equivalent of
+    `_stream_vocals`. `separate_voc` is a callback: `(ch, t)` numpy -> vocal `(ch, t)` numpy."""
+
+    def __init__(self, separate_voc, sr, chunk_s, context_s, fade_s, channels=2):
+        import numpy as np
+
+        self.sep = separate_voc
+        self.sr = sr
+        self.hop = max(1, int(chunk_s * sr))
+        self.ola = max(0, int(fade_s * sr))
+        self.ctx = int(context_s * sr)
+        self.max_seg = int(7.6 * sr)  # Demucs window
+        self.inbuf = np.zeros((channels, 0), dtype="float32")
+        self.base = 0  # absolute index of inbuf[:, 0]
+        self.processed = 0  # absolute count of emitted samples (k * hop)
+        self.held = np.zeros((channels, self.ola), dtype="float32")  # prev block's faded-out tail
+        self.k = 0
+        self.fin = np.linspace(0.0, 1.0, self.ola, dtype="float32") if self.ola else None
+        self.fout = np.linspace(1.0, 0.0, self.ola, dtype="float32") if self.ola else None
+
+    def push(self, x):
+        import numpy as np
+
+        self.inbuf = np.concatenate([self.inbuf, x.astype("float32")], axis=1)
+
+    def pop(self):
+        import numpy as np
+
+        emitted = []
+        # Process whenever we have a full hop + the crossfade lookahead buffered ahead of `processed`.
+        while self.base + self.inbuf.shape[1] >= self.processed + self.hop + self.ola:
+            pos = self.processed
+            seg_end = pos + self.hop + self.ola
+            start = max(0, pos - self.ctx, seg_end - self.max_seg)
+            seg = self.inbuf[:, start - self.base : seg_end - self.base]
+            voc = self.sep(seg)  # (ch, seg_end-start)
+            blk = voc[:, pos - start : seg_end - start]  # (ch, hop+ola)
+            if self.ola:
+                head = blk[:, : self.ola].copy() if self.k == 0 else blk[:, : self.ola] * self.fin + self.held
+                mid = blk[:, self.ola : self.hop]
+                self.held = blk[:, self.hop : self.hop + self.ola] * self.fout  # hold tail for next block
+                emit = np.concatenate([head, mid], axis=1)
+            else:
+                emit = blk[:, : self.hop]
+            emitted.append(emit)
+            self.processed += self.hop
+            self.k += 1
+            keep = max(0, self.processed - self.max_seg)  # drop input no longer needed for context
+            if keep > self.base:
+                self.inbuf = self.inbuf[:, keep - self.base :]
+                self.base = keep
+        return emitted
+
+
 def _bake_model():
     from demucs.pretrained import get_model
 
@@ -234,6 +292,53 @@ class Separator:
             )
         return {"sr": self.sr, "results": results}
 
+    def _sep_voc(self, seg):
+        # seg: torch (ch, t) -> vocal (ch, t) numpy. Per-segment normalisation (online has no global
+        # stats); the 5 s+ window keeps std stable enough that this doesn't pump between blocks.
+        from demucs.apply import apply_model
+
+        torch = self.torch
+        ref = seg.mean(0)
+        mean, std = ref.mean(), ref.std() + 1e-8
+        x = (seg - mean) / std
+        with torch.no_grad():
+            out = apply_model(self.model, x[None].to(self.device), split=False, device=self.device)[0]
+        out = out * std + mean
+        return out[self.voc_idx].cpu().numpy()
+
+    @modal.method()
+    def stream_test(self, audio_bytes: bytes, frame_ms: int = 20, max_seconds: int = 20):
+        """Validate the ONLINE separator offline: feed the clip in `frame_ms` frames (as WebRTC
+        would) through OnlineSeparator and reconstruct the vocal. Confirms the streaming buffer +
+        crossfade logic before it goes near aiortc. overall_rtf < 1 ⇒ keeps up in real time."""
+        import time
+
+        import numpy as np
+
+        torch = self.torch
+        wav = self._decode(audio_bytes, max_seconds).numpy()
+        online = OnlineSeparator(
+            lambda s: self._sep_voc(torch.from_numpy(np.ascontiguousarray(s))),
+            self.sr, CHUNK_S, CONTEXT_S, FADE_S, channels=wav.shape[0],
+        )
+        frame = max(1, int(frame_ms / 1000 * self.sr))
+        parts = []
+        t0 = time.perf_counter()
+        for i in range(0, wav.shape[1], frame):
+            online.push(wav[:, i : i + frame])
+            parts.extend(online.pop())
+        self._sync()
+        wall = time.perf_counter() - t0
+        vocals = np.concatenate(parts, axis=1) if parts else np.zeros((wav.shape[0], 0), dtype="float32")
+        audio_s = vocals.shape[1] / self.sr
+        return {
+            "sr": self.sr,
+            "wall_s": round(wall, 2),
+            "audio_s": round(audio_s, 2),
+            "overall_rtf": round(wall / max(audio_s, 1e-3), 3),
+            "vocals_wav": self._to_wav(vocals),
+        }
+
 
 @app.local_entrypoint()
 def main():
@@ -275,3 +380,18 @@ def sweep(input: str, outdir: str = "."):
         with open(p, "wb") as f:
             f.write(r["vocals_wav"])
         print("  wrote", p)
+
+
+@app.local_entrypoint()
+def streamtest(input: str, outdir: str = "."):
+    # Offline validation of the ONLINE streaming separator (the live path's core logic).
+    import os
+
+    with open(input, "rb") as f:
+        data = f.read()
+    res = Separator().stream_test.remote(data)
+    print(f"sr={res['sr']}  audio={res['audio_s']}s  wall={res['wall_s']}s  overall_rtf={res['overall_rtf']}")
+    p = os.path.join(outdir, "out_streamtest.wav")
+    with open(p, "wb") as f:
+        f.write(res["vocals_wav"])
+    print("wrote", p)
