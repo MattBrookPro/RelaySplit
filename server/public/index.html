@@ -8,18 +8,23 @@
   :root { --bg:#0f1115; --card:#1a1d24; --fg:#e8e8ea; --mut:#9aa0aa; --acc:#5b8cff; --ok:#3ad29f; }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 system-ui, sans-serif; }
-  .wrap { max-width: 680px; margin: 40px auto; padding: 0 18px; }
+  .wrap { max-width: 700px; margin: 40px auto; padding: 0 18px; }
   h1 { font-size: 24px; margin: 0 0 2px; } .sub { color:var(--mut); margin:0 0 22px; }
   .card { background:var(--card); border:1px solid #262a33; border-radius:10px; padding:18px; margin:14px 0; }
-  h2 { font-size:15px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); margin:0 0 12px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); margin:0 0 12px; }
   input, select, button { font:14px system-ui; padding:9px 11px; border-radius:7px; border:1px solid #2d323c; background:#11141a; color:var(--fg); }
   button { background:var(--acc); border:none; color:#fff; cursor:pointer; font-weight:600; }
   button.sec { background:#2a2f3a; }
   a.cta { display:inline-block; background:var(--ok); color:#062018; font-weight:700; padding:11px 16px; border-radius:8px; text-decoration:none; }
   .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-  .muted { color:var(--mut); } .err { color:#ff8a8a; } table { width:100%; border-collapse:collapse; }
-  td,th { text-align:left; padding:6px 4px; border-bottom:1px solid #262a33; } .pill{font-family:ui-monospace,monospace;font-size:12px;background:#11141a;padding:1px 7px;border-radius:5px}
+  .muted { color:var(--mut); } .err { color:#ff8a8a; margin-left:8px; }
+  .chan { border-top:1px solid #262a33; padding:12px 0; }
+  .chan:first-child { border-top:0; }
+  .pill { font-family:ui-monospace,monospace; font-size:12px; background:#11141a; padding:1px 7px; border-radius:5px; }
+  .chip { font-size:13px; padding:4px 10px; border-radius:14px; border:1px solid #2d323c; background:#11141a; color:var(--mut); cursor:pointer; }
+  .chip.on { background:var(--ok); color:#062018; border-color:var(--ok); font-weight:600; }
   .hide { display:none; }
+  .lbl { font-size:12px; color:var(--mut); margin:8px 0 4px; }
 </style>
 </head>
 <body>
@@ -27,9 +32,8 @@
   <h1>RelaySplit</h1>
   <p class="sub">Real-time neural vocal separation over the network, on a region-pinned cloud GPU.</p>
 
-  <!-- AUTH (logged out) -->
   <div id="auth" class="card">
-    <h2 id="authTitle">Sign in</h2>
+    <h2>Sign in</h2>
     <div class="row">
       <input id="username" placeholder="username" autocomplete="username" />
       <input id="password" type="password" placeholder="password" autocomplete="current-password" />
@@ -41,7 +45,6 @@
     </div>
   </div>
 
-  <!-- APP (logged in) -->
   <div id="app" class="hide">
     <div class="card">
       <div class="row" style="justify-content:space-between">
@@ -50,24 +53,35 @@
       </div>
       <p style="margin:14px 0 6px">Hear it live — clean music in, isolated vocal back through the GPU:</p>
       <div class="row">
-        <a class="cta" id="liveLink" href="#" target="_blank">▶ Open the live separator</a>
-        <a class="cta" id="demoLink" href="#" target="_blank" style="background:#2a2f3a;color:#fff">One-click demo</a>
+        <a class="cta" id="liveLink" target="_blank">▶ Open the live separator</a>
+        <a class="cta" id="demoLink" target="_blank" style="background:#2a2f3a;color:#fff">One-click demo</a>
       </div>
     </div>
 
     <div class="card">
-      <h2>Your channels</h2>
-      <table id="chTable"><tbody></tbody></table>
-      <div class="row" style="margin-top:12px">
+      <h2>Peers</h2>
+      <div id="peerList" class="muted">—</div>
+      <div class="lbl">Invite a peer (they need a RelaySplit account):</div>
+      <div class="row">
+        <input id="peerName" placeholder="peer username" />
+        <button id="peerAdd">Add peer</button>
+        <span id="peerErr" class="err"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Your channels — click a peer to share this broadcast with them</h2>
+      <div id="channels"></div>
+      <div class="row" style="margin-top:14px">
         <input id="chName" placeholder="channel name (e.g. Lead Vox)" />
         <select id="chStem"><option>vocals</option><option>accompaniment</option></select>
-        <button id="chAdd">Create</button>
+        <button id="chAdd">Create channel</button>
       </div>
     </div>
 
     <div class="card">
-      <h2>Live now (presence)</h2>
-      <div id="presence" class="muted">—</div>
+      <h2>Shared with me (broadcasts I can receive)</h2>
+      <div id="shared" class="muted">—</div>
     </div>
   </div>
 </div>
@@ -76,61 +90,96 @@
 const LIVE = "https://blitzncs--relaysplit-live-web.modal.run";
 const $ = (id) => document.getElementById(id);
 const tok = () => localStorage.getItem("rs_token");
-const api = (path, opts={}) => fetch("/api"+path, {
+const api = (path, opts = {}) => fetch("/api" + path, {
   ...opts,
-  headers: { "Content-Type":"application/json", ...(tok()?{Authorization:"Bearer "+tok()}:{}) , ...(opts.headers||{}) },
-}).then(async r => { const j = await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.error||("HTTP "+r.status)); return j; });
+  headers: { "Content-Type": "application/json", ...(tok() ? { Authorization: "Bearer " + tok() } : {}), ...(opts.headers || {}) },
+}).then(async (r) => { const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || ("HTTP " + r.status)); return j; });
 
-async function auth(kind){
+async function auth(kind) {
   $("authErr").textContent = "";
   try {
-    const body = JSON.stringify({ username:$("username").value, password:$("password").value });
-    const res = await api("/"+kind, { method:"POST", body });
+    const body = JSON.stringify({ username: $("username").value, password: $("password").value });
+    const res = await api("/" + kind, { method: "POST", body });
     localStorage.setItem("rs_token", res.token);
     await showApp();
-  } catch(e){ $("authErr").textContent = e.message; }
+  } catch (e) { $("authErr").textContent = e.message; }
 }
-$("loginBtn").onclick = ()=>auth("login");
-$("registerBtn").onclick = ()=>auth("register");
-$("logout").onclick = ()=>{ localStorage.removeItem("rs_token"); location.reload(); };
-
+$("loginBtn").onclick = () => auth("login");
+$("registerBtn").onclick = () => auth("register");
+$("logout").onclick = () => { localStorage.removeItem("rs_token"); location.reload(); };
 $("liveLink").href = LIVE + "/";
 $("demoLink").href = LIVE + "/demo";
 
-async function showApp(){
+let myPeers = [];
+
+async function showApp() {
   let me;
-  try { me = await api("/me"); } catch { return; } // not logged in -> stay on auth
+  try { me = await api("/me"); } catch { return; }
   $("auth").classList.add("hide"); $("app").classList.remove("hide");
   $("who").textContent = me.account.username;
-  await refreshChannels(); await refreshPresence();
+  await refreshPeers();
+  await refreshChannels();
+  await refreshShared();
 }
 
-async function refreshChannels(){
+async function refreshPeers() {
+  const { peers } = await api("/peers");
+  myPeers = peers;
+  $("peerList").textContent = peers.length ? peers.map((p) => p.username).join(", ") : "no peers yet — invite one below";
+}
+$("peerAdd").onclick = async () => {
+  $("peerErr").textContent = "";
+  try { await api("/peers", { method: "POST", body: JSON.stringify({ username: $("peerName").value }) }); $("peerName").value = ""; await refreshPeers(); await refreshChannels(); }
+  catch (e) { $("peerErr").textContent = e.message; }
+};
+
+async function refreshChannels() {
   const { channels } = await api("/channels");
-  const tb = $("chTable").querySelector("tbody");
-  tb.innerHTML = channels.length ? "" : "<tr><td class='muted'>no channels yet</td></tr>";
-  for (const c of channels){
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${c.name}</td><td><span class="pill">${c.stem}</span></td><td class="muted">#${c.id}</td>`;
-    tb.appendChild(tr);
+  const box = $("channels");
+  box.innerHTML = channels.length ? "" : "<div class='muted'>no channels yet</div>";
+  for (const c of channels) {
+    const { shared } = await api("/channels/" + c.id + "/shares");
+    const sharedIds = new Set(shared.map((s) => s.id));
+    const div = document.createElement("div");
+    div.className = "chan";
+    const head = document.createElement("div");
+    head.innerHTML = `<b>${c.name}</b> <span class="pill">${c.stem}</span>`;
+    div.appendChild(head);
+    const chips = document.createElement("div");
+    chips.className = "row";
+    chips.style.marginTop = "8px";
+    if (!myPeers.length) chips.innerHTML = "<span class='muted'>invite peers to share with</span>";
+    for (const p of myPeers) {
+      const on = sharedIds.has(p.id);
+      const chip = document.createElement("span");
+      chip.className = "chip" + (on ? " on" : "");
+      chip.textContent = (on ? "✓ " : "+ ") + p.username;
+      chip.onclick = async () => {
+        if (on) await api("/channels/" + c.id + "/share/" + p.id, { method: "DELETE" });
+        else    await api("/channels/" + c.id + "/share", { method: "POST", body: JSON.stringify({ peerId: p.id }) });
+        await refreshChannels();
+      };
+      chips.appendChild(chip);
+    }
+    div.appendChild(chips);
+    box.appendChild(div);
   }
 }
-$("chAdd").onclick = async ()=>{
-  await api("/channels", { method:"POST", body: JSON.stringify({ name:$("chName").value, stem:$("chStem").value }) });
+$("chAdd").onclick = async () => {
+  await api("/channels", { method: "POST", body: JSON.stringify({ name: $("chName").value, stem: $("chStem").value }) });
   $("chName").value = ""; await refreshChannels();
 };
 
-async function refreshPresence(){
+async function refreshShared() {
   try {
-    const { rooms } = await api("/presence");
-    $("presence").textContent = rooms.length
-      ? rooms.map(r => `${r.room}: ${r.peers.map(p=>p.name||p.role).join(", ")}`).join("  ·  ")
-      : "nobody connected right now";
-  } catch(e){ $("presence").textContent = "—"; }
+    const { channels } = await api("/shared-with-me");
+    $("shared").innerHTML = channels.length
+      ? channels.map((c) => `<div class="chan"><b>${c.name}</b> <span class="pill">${c.stem}</span> <span class="muted">from ${c.owner}</span></div>`).join("")
+      : "nothing shared with you yet";
+  } catch { $("shared").textContent = "—"; }
 }
 
 showApp();
-setInterval(()=>{ if(tok() && !$("app").classList.contains("hide")) refreshPresence(); }, 5000);
 </script>
 </body>
 </html>

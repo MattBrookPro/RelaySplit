@@ -87,5 +87,54 @@ export function createAccountsRouter(): express.Router {
     res.json({ channel: { id: Number(info.lastInsertRowid), name, stem } });
   });
 
+  // Sharing — assign which of my peers can receive a given channel (broadcast).
+  const ownChannel = (acct: Account, id: number) =>
+    db.prepare("SELECT id FROM channels WHERE id = ? AND owner_id = ?").get(id, acct.id);
+
+  r.get("/channels/:id/shares", (req, res) => {
+    const acct = requireAuth(req, res);
+    if (!acct) return;
+    if (!ownChannel(acct, Number(req.params.id))) return res.status(404).json({ error: "no such channel" });
+    const shared = db
+      .prepare("SELECT a.id, a.username FROM shares s JOIN accounts a ON a.id = s.account_id WHERE s.channel_id = ?")
+      .all(Number(req.params.id));
+    res.json({ shared });
+  });
+
+  r.post("/channels/:id/share", (req, res) => {
+    const acct = requireAuth(req, res);
+    if (!acct) return;
+    const channelId = Number(req.params.id);
+    if (!ownChannel(acct, channelId)) return res.status(404).json({ error: "no such channel" });
+    const peerId = Number(req.body?.peerId);
+    if (!db.prepare("SELECT 1 FROM peers WHERE account_id = ? AND peer_id = ?").get(acct.id, peerId))
+      return res.status(400).json({ error: "not one of your peers" });
+    db.prepare("INSERT OR IGNORE INTO shares (channel_id, account_id) VALUES (?, ?)").run(channelId, peerId);
+    res.json({ ok: true });
+  });
+
+  r.delete("/channels/:id/share/:peerId", (req, res) => {
+    const acct = requireAuth(req, res);
+    if (!acct) return;
+    const channelId = Number(req.params.id);
+    if (!ownChannel(acct, channelId)) return res.status(404).json({ error: "no such channel" });
+    db.prepare("DELETE FROM shares WHERE channel_id = ? AND account_id = ?").run(channelId, Number(req.params.peerId));
+    res.json({ ok: true });
+  });
+
+  // Broadcasts other people have shared WITH me (what I can receive).
+  r.get("/shared-with-me", (req, res) => {
+    const acct = requireAuth(req, res);
+    if (!acct) return;
+    const channels = db
+      .prepare(
+        `SELECT c.id, c.name, c.stem, a.username AS owner
+         FROM shares s JOIN channels c ON c.id = s.channel_id JOIN accounts a ON a.id = c.owner_id
+         WHERE s.account_id = ?`,
+      )
+      .all(acct.id);
+    res.json({ channels });
+  });
+
   return r;
 }
