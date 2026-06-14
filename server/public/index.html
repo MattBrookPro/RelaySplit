@@ -143,7 +143,10 @@ async function refreshChannels() {
     const div = document.createElement("div");
     div.className = "chan";
     const head = document.createElement("div");
-    head.innerHTML = `<b>${c.name}</b> <span class="pill">${c.stem}</span>`;
+    head.className = "row";
+    head.style.justifyContent = "space-between";
+    head.innerHTML = `<span><b>${c.name}</b> <span class="pill">${c.stem}</span></span>`
+      + `<a class="cta" style="padding:4px 11px;font-size:12px" target="_blank" href="${LIVE}/?channel=${c.id}">▶ Broadcast this</a>`;
     div.appendChild(head);
     const chips = document.createElement("div");
     chips.className = "row";
@@ -174,7 +177,9 @@ async function refreshShared() {
   try {
     const { channels } = await api("/shared-with-me");
     $("shared").innerHTML = channels.length
-      ? channels.map((c) => `<div class="chan"><b>${c.name}</b> <span class="pill">${c.stem}</span> <span class="muted">from ${c.owner}</span></div>`).join("")
+      ? channels.map((c) => `<div class="chan row" style="justify-content:space-between">`
+          + `<span><b>${c.name}</b> <span class="pill">${c.stem}</span> <span class="muted">from ${c.owner}</span></span>`
+          + `<a class="cta" style="padding:4px 11px;font-size:12px" target="_blank" href="${LIVE}/listen?channel=${c.id}">▶ Tune in</a></div>`).join("")
       : "nothing shared with you yet";
   } catch { $("shared").textContent = "—"; }
 }

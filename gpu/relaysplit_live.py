@@ -146,6 +146,7 @@ INDEX_HTML = r"""<!doctype html>
 <script>
 const $=id=>document.getElementById(id), log=m=>{$("log").textContent+=m+"\n";console.log(m)};
 const setb=(el,t,c)=>{el.textContent=t;el.className="badge "+(c||"")};
+const CHANNEL=new URLSearchParams(location.search).get("channel")||"";  // broadcast key (peers tune into it)
 let pc, srcStream, statsTimer, dc;
 
 async function start(){
@@ -189,8 +190,9 @@ async function start(){
 
     await pc.setLocalDescription(await pc.createOffer());
     await new Promise(r=>{if(pc.iceGatheringState=="complete")return r();const c=()=>{if(pc.iceGatheringState=="complete"){pc.removeEventListener("icegatheringstatechange",c);r()}};pc.addEventListener("icegatheringstatechange",c);setTimeout(r,4000)});
-    const ans=await (await fetch("offer",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sdp:pc.localDescription.sdp,type:pc.localDescription.type})})).json();
+    const ans=await (await fetch("offer",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({channel:CHANNEL,sdp:pc.localDescription.sdp,type:pc.localDescription.type})})).json();
     await pc.setRemoteDescription(ans);
+    if(CHANNEL)log("broadcasting channel "+CHANNEL+" — assigned peers can tune in");
     log("negotiating...");$("stop").disabled=false;
   }catch(err){log("ERROR "+err);setb($("conn"),"error","bad");$("start").disabled=false}
 }
@@ -268,6 +270,77 @@ function poll(){setInterval(async()=>{const s=await pc.getStats();s.forEach(r=>{
 """
 
 
+# Receiver page: tune in to a peer's live separated broadcast (the DATA-plane other half of sharing).
+# Pure downlink — no mic/file, no uplink audio. ?channel=<id> says which broadcast to receive.
+LISTEN_HTML = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>RelaySplit — tune in</title>
+<style>
+  body{font:15px/1.5 system-ui,sans-serif;max-width:680px;margin:40px auto;padding:0 16px}
+  h1{font-size:20px} button{font-size:15px;padding:8px 16px;cursor:pointer}
+  .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0}
+  .badge{padding:2px 10px;border-radius:4px;background:#eee;font-family:ui-monospace,monospace}
+  .ok{background:#d4f7d4}.bad{background:#f7d4d4}.warn{background:#f7efd4}
+  .meter{font-size:22px;font-family:ui-monospace,monospace}
+  #log{white-space:pre-wrap;background:#111;color:#6f6;padding:10px;border-radius:6px;margin-top:12px;font:12px ui-monospace,monospace;min-height:80px}
+</style></head><body>
+<h1>RelaySplit — tune in to a live broadcast</h1>
+<p>Receiving a peer's <b>separated vocal</b> straight from the UK GPU. <b>Headphones recommended.</b></p>
+<div class="row">
+  channel <span id="ch" class="badge">—</span>
+  <button id="start">Tune in</button><button id="stop" disabled>Stop</button>
+  <span>conn <span id="conn" class="badge">—</span></span>
+  <span>path <span id="path" class="badge">—</span></span>
+</div>
+<div class="row meter">
+  net RTT <span id="rtt" class="badge">— ms</span>
+  &nbsp; inference <span id="inf" class="badge">— ms</span>
+</div>
+<audio id="out" autoplay></audio>
+<div id="log"></div>
+<script>
+const $=id=>document.getElementById(id), log=m=>{$("log").textContent+=m+"\n";console.log(m)};
+const setb=(el,t,c)=>{el.textContent=t;el.className="badge "+(c||"")};
+const CHANNEL=new URLSearchParams(location.search).get("channel")||"";
+$("ch").textContent=CHANNEL||"(none)";
+let pc, statsTimer;
+async function start(){
+  if(!CHANNEL){log("no ?channel= in the URL");return}
+  $("start").disabled=true;
+  try{
+    const {iceServers}=await (await fetch("ice")).json();
+    pc=new RTCPeerConnection({iceServers});
+    pc.onconnectionstatechange=()=>{const s=pc.connectionState;setb($("conn"),s,s=="connected"?"ok":(s=="failed"?"bad":"warn"));log("conn "+s);if(s=="connected")poll()};
+    pc.ontrack=e=>{log("remote track: "+e.track.kind);$("out").srcObject=e.streams[0]};
+    const dc=pc.createDataChannel("stats");
+    dc.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.infer_ms!=null)setb($("inf"),d.infer_ms.toFixed(0)+" ms","ok")}catch{}};
+    pc.addTransceiver("audio",{direction:"recvonly"});  // downlink only — we send no audio
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise(r=>{if(pc.iceGatheringState=="complete")return r();const c=()=>{if(pc.iceGatheringState=="complete"){pc.removeEventListener("icegatheringstatechange",c);r()}};pc.addEventListener("icegatheringstatechange",c);setTimeout(r,4000)});
+    const ans=await (await fetch("subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({channel:CHANNEL,sdp:pc.localDescription.sdp,type:pc.localDescription.type})})).json();
+    if(ans.error){log("ERROR "+ans.error);$("start").disabled=false;return}
+    await pc.setRemoteDescription(ans);
+    log("subscribed to channel "+CHANNEL);$("stop").disabled=false;
+  }catch(err){log("ERROR "+err);setb($("conn"),"error","bad");$("start").disabled=false}
+}
+function poll(){
+  if(statsTimer)return;
+  statsTimer=setInterval(async()=>{
+    const s=await pc.getStats(); let pair,c={};
+    s.forEach(r=>{if(r.type=="candidate-pair"&&r.nominated&&r.state=="succeeded")pair=r;if(r.type.endsWith("-candidate"))c[r.id]=r});
+    if(pair){
+      if(pair.currentRoundTripTime!=null)setb($("rtt"),(pair.currentRoundTripTime*1000).toFixed(0)+" ms","ok");
+      const l=c[pair.localCandidateId],rc=c[pair.remoteCandidateId];
+      if(l&&rc)setb($("path"),l.candidateType+" / "+rc.candidateType,(l.candidateType=="relay"||rc.candidateType=="relay")?"warn":"ok");
+    }
+  },1000);
+}
+function stop(){clearInterval(statsTimer);statsTimer=null;if(pc)pc.close();$("stop").disabled=true;$("start").disabled=false;log("stopped")}
+$("start").onclick=start;$("stop").onclick=stop;
+</script></body></html>
+"""
+
+
 @app.function(image=image, gpu=["L4", "A10G", "L40S", "A100"], region=REGION, max_containers=1, scaledown_window=300)
 @modal.concurrent(max_inputs=12)
 @modal.asgi_app()
@@ -277,6 +350,7 @@ def web():
     import logging
     import time
     import urllib.request
+    import uuid
     from fractions import Fraction
 
     import av
@@ -321,37 +395,73 @@ def web():
             log.warning("get_ice failed (%s); STUN only", e)
             return [{"urls": ["stun:stun.l.google.com:19302"]}]
 
-    class SeparatedTrack(MediaStreamTrack):
-        kind = "audio"
+    # --- The fan-out HUB: one Broadcast per channel, many FanoutTrack readers --------------------
+    # This is what turns peer ASSIGNMENT (control plane: the shares table) into actual audio
+    # DELIVERY (data plane). A sender feeds ONE Broadcast (a single OnlineSeparator writing to a
+    # shared, trimmed timeline); the sender's own monitor AND every assigned receiver each attach a
+    # FanoutTrack that reads that timeline independently. aiortc tracks are single-consumer, so the
+    # split (one producer / N independent reader cursors) is what lets the separated stream fan out.
+    broadcasts = {}  # channel key -> Broadcast
 
-        def __init__(self, source, channel_box):
-            super().__init__()
-            self.source = source
-            self.channel_box = channel_box  # mutable holder for the stats data channel
+    class Broadcast:
+        MAXKEEP = WEBRTC_SR * 2  # keep ~2 s of separated history for slow/late-joining receivers
+
+        def __init__(self, key):
+            self.key = key
             self.sep = OnlineSeparator(sep_voc, MODEL_SR, CHUNK_S, CONTEXT_S, FADE_S)
             self.r_in = av.AudioResampler(format="fltp", layout="stereo", rate=MODEL_SR)
             self.r_out = av.AudioResampler(format="fltp", layout="stereo", rate=WEBRTC_SR)
-            self.ring = np.zeros((2, 0), dtype="float32")
             self.lock = asyncio.Lock()
-            self._start = None
-            self._ts = 0
+            self.buf = np.zeros((2, 0), dtype="float32")  # shared separated output @ 48 kHz
+            self.base = 0          # absolute sample index of buf[:, 0]
+            self.write = 0         # absolute sample index just past buf's end
+            self.infer_ms = 0.0
+            self.subscribers = 0   # FanoutTracks currently attached
+            self.source = None     # the sender's inbound track (None between senders)
+            self.box = {}          # sender's stats data channel holder
             self._opts = 0
             self.task = asyncio.ensure_future(self._consume())
 
+        def set_source(self, track, box):
+            # A (re)connecting sender takes over the broadcast; the separator state simply continues.
+            self.source = track
+            self.box = box
+
         async def _consume(self):
             loop = asyncio.get_event_loop()
+            idle_since = None
             try:
                 while True:
-                    frame = await self.source.recv()
+                    src = self.source
+                    if src is None:
+                        # Reap a broadcast with no source AND nobody listening (keeps the dict clean).
+                        if self.subscribers == 0:
+                            idle_since = idle_since or time.time()
+                            if time.time() - idle_since > 30:
+                                break
+                        else:
+                            idle_since = None
+                        await asyncio.sleep(0.1)
+                        continue
+                    idle_since = None
+                    try:
+                        frame = await src.recv()
+                    except Exception:
+                        if self.source is src:  # sender went away; keep the broadcast alive for receivers
+                            self.source = None
+                        continue
                     for rf in self.r_in.resample(frame):
                         self.sep.push(rf.to_ndarray())  # (2, n) float32 @ 44.1k
                     t0 = time.perf_counter()
                     blocks = await loop.run_in_executor(None, self.sep.pop)  # GPU off the loop
                     if blocks:
-                        infer_ms = (time.perf_counter() - t0) * 1000 / len(blocks)
-                        ch = self.channel_box.get("dc")
+                        self.infer_ms = (time.perf_counter() - t0) * 1000 / len(blocks)
+                        ch = self.box.get("dc")
                         if ch and ch.readyState == "open":
-                            ch.send(json.dumps({"infer_ms": round(infer_ms, 1)}))
+                            try:
+                                ch.send(json.dumps({"infer_ms": round(self.infer_ms, 1)}))
+                            except Exception:
+                                pass
                     for blk in blocks:
                         af = av.AudioFrame.from_ndarray(np.ascontiguousarray(blk), format="fltp", layout="stereo")
                         af.sample_rate = MODEL_SR
@@ -361,9 +471,43 @@ def web():
                         for of in self.r_out.resample(af):
                             arr = of.to_ndarray()  # (2, m) @ 48k
                             async with self.lock:
-                                self.ring = np.concatenate([self.ring, arr], axis=1)
+                                self.buf = np.concatenate([self.buf, arr], axis=1)
+                                self.write += arr.shape[1]
+                                if self.buf.shape[1] > self.MAXKEEP:  # trim history, advance base
+                                    drop = self.buf.shape[1] - self.MAXKEEP
+                                    self.buf = self.buf[:, drop:]
+                                    self.base += drop
             except Exception as e:
-                log.info("consume ended: %s", e)
+                log.info("broadcast %s consume error: %s", self.key, e)
+            finally:
+                if broadcasts.get(self.key) is self:
+                    del broadcasts[self.key]
+                log.info("broadcast %s closed", self.key)
+
+    def get_broadcast(key):
+        bc = broadcasts.get(key)
+        if bc is None:
+            bc = Broadcast(key)
+            broadcasts[key] = bc
+        return bc
+
+    class FanoutTrack(MediaStreamTrack):
+        kind = "audio"
+
+        def __init__(self, bc):
+            super().__init__()
+            self.bc = bc
+            bc.subscribers += 1
+            self._stopped = False
+            self.cursor = None  # absolute read index into the broadcast timeline; locks on at 1st audio
+            self._start = None
+            self._ts = 0
+
+        def stop(self):
+            if not self._stopped:
+                self._stopped = True
+                self.bc.subscribers -= 1
+            super().stop()
 
         async def recv(self):
             n = WEBRTC_SR // 50  # 20 ms
@@ -374,12 +518,22 @@ def web():
             wait = self._start + self._ts / WEBRTC_SR - time.time()
             if wait > 0:
                 await asyncio.sleep(wait)
-            async with self.lock:
-                if self.ring.shape[1] >= n:
-                    out = self.ring[:, :n]
-                    self.ring = self.ring[:, n:]
-                else:
-                    out = np.zeros((2, n), dtype="float32")
+            out = None
+            async with self.bc.lock:
+                w, b = self.bc.write, self.bc.base
+                if self.cursor is None and w > 0:
+                    self.cursor = w  # first audio: lock onto the live edge (don't replay history)
+                if self.cursor is not None:
+                    if self.cursor < b:
+                        self.cursor = b  # we fell off the trimmed history — jump to oldest kept
+                    if w - self.cursor > WEBRTC_SR // 2:
+                        self.cursor = max(b, w - n)  # >0.5 s behind: resync near live
+                    if w - self.cursor >= n:
+                        off = self.cursor - b
+                        out = self.bc.buf[:, off:off + n].copy()
+                        self.cursor += n
+            if out is None:
+                out = np.zeros((2, n), dtype="float32")  # warming up / starved: silence, hold cursor
             s16 = (np.clip(out, -1, 1) * 32767).astype("int16")
             frame = av.AudioFrame.from_ndarray(s16.T.reshape(1, -1), format="s16", layout="stereo")
             frame.sample_rate = WEBRTC_SR
@@ -389,6 +543,21 @@ def web():
 
     api = FastAPI()
     pcs = set()
+
+    async def stats_pinger(pc, bc, box):
+        # Receivers don't share the sender's stats data channel, so report the broadcast's current
+        # inference time on the receiver's own channel once a second (drives its latency meter).
+        try:
+            while pc.connectionState in ("new", "connecting", "connected"):
+                ch = box.get("dc")
+                if ch and ch.readyState == "open":
+                    try:
+                        ch.send(json.dumps({"infer_ms": round(bc.infer_ms, 1)}))
+                    except Exception:
+                        pass
+                await asyncio.sleep(1)
+        except Exception:
+            pass
 
     @api.get("/", response_class=HTMLResponse)
     async def index():
@@ -415,11 +584,15 @@ def web():
 
     @api.post("/offer")
     async def offer(request: Request):
+        # Sender path. With a `channel`, the sender feeds that named broadcast (which assigned peers
+        # can tune into); without one, a private per-connection broadcast (the original 1:1 demo).
         params = await request.json()
+        key = str(params.get("channel") or ("solo-" + uuid.uuid4().hex))
         servers = [RTCIceServer(**s) for s in get_ice()]
         pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=servers))
         pcs.add(pc)
         box = {}
+        bc = get_broadcast(key)
 
         @pc.on("datachannel")
         def on_dc(channel):
@@ -427,7 +600,7 @@ def web():
 
         @pc.on("connectionstatechange")
         async def on_state():
-            log.info("pc state %s", pc.connectionState)
+            log.info("pc(offer %s) state %s", key, pc.connectionState)
             if pc.connectionState in ("failed", "closed"):
                 await pc.close()
                 pcs.discard(pc)
@@ -435,12 +608,58 @@ def web():
         @pc.on("track")
         def on_track(track):
             if track.kind == "audio":
-                pc.addTrack(SeparatedTrack(track, box))
+                bc.set_source(track, box)
 
+        pc.addTrack(FanoutTrack(bc))  # send the separated stream back as the sender's local monitor
         await pc.setRemoteDescription(RTCSessionDescription(sdp=params["sdp"], type=params["type"]))
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
-        return JSONResponse({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
+        return JSONResponse({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type, "channel": key})
+
+    @api.post("/subscribe")
+    async def subscribe(request: Request):
+        # Receiver path (Modal-direct): no uplink audio — the receiver just attaches a FanoutTrack to
+        # the requested broadcast. The broadcast is created on demand so a receiver can tune in before
+        # the sender starts (it hears silence, then the separated vocal the instant the sender goes live).
+        params = await request.json()
+        key = str(params.get("channel") or "")
+        if not key:
+            return JSONResponse({"error": "channel required"}, status_code=400)
+        servers = [RTCIceServer(**s) for s in get_ice()]
+        pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=servers))
+        pcs.add(pc)
+        bc = get_broadcast(key)
+        box = {}
+
+        @pc.on("datachannel")
+        def on_dc(channel):
+            box["dc"] = channel
+            asyncio.ensure_future(stats_pinger(pc, bc, box))
+
+        @pc.on("connectionstatechange")
+        async def on_state():
+            log.info("pc(subscribe %s) state %s", key, pc.connectionState)
+            if pc.connectionState in ("failed", "closed"):
+                await pc.close()
+                pcs.discard(pc)
+
+        pc.addTrack(FanoutTrack(bc))
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=params["sdp"], type=params["type"]))
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        return JSONResponse({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type, "channel": key})
+
+    @api.get("/live")
+    async def live():
+        # What's on air right now — a sender feeding it (live) and/or receivers attached.
+        return JSONResponse({"broadcasts": [
+            {"channel": k, "live": b.source is not None, "subscribers": b.subscribers}
+            for k, b in broadcasts.items()
+        ]})
+
+    @api.get("/listen", response_class=HTMLResponse)
+    async def listen_page():
+        return LISTEN_HTML
 
     # --- VPS /ws session peer (brief's end-state: signalling via the control plane) ----------
     # The container also joins the VPS /ws as a "modal" peer in a lobby room. A sender that joins the
@@ -449,14 +668,21 @@ def web():
     VPS_WS = "wss://relaysplit.vaguelystrange.com/ws"
     ROOM = "gpu-lobby"
 
-    async def handle_ws_offer(ws, sender_id, offer_sdp):
+    async def handle_ws_offer(ws, sender_id, data):
+        # Same broadcast model as /offer + /subscribe, but signalled through the VPS. The offer's data
+        # carries `channel` (broadcast key) and `recv` (true = tune in only, false/absent = broadcast).
+        key = str(data.get("channel") or ("solo-" + uuid.uuid4().hex))
+        recv = bool(data.get("recv"))
         pc = RTCPeerConnection(RTCConfiguration(iceServers=[RTCIceServer(**s) for s in get_ice()]))
         pcs.add(pc)
         box = {}
+        bc = get_broadcast(key)
 
         @pc.on("datachannel")
         def _dc(channel):
             box["dc"] = channel
+            if recv:
+                asyncio.ensure_future(stats_pinger(pc, bc, box))
 
         @pc.on("connectionstatechange")
         async def _st():
@@ -464,12 +690,14 @@ def web():
                 await pc.close()
                 pcs.discard(pc)
 
-        @pc.on("track")
-        def _tr(track):
-            if track.kind == "audio":
-                pc.addTrack(SeparatedTrack(track, box))
+        if not recv:
+            @pc.on("track")
+            def _tr(track):
+                if track.kind == "audio":
+                    bc.set_source(track, box)
 
-        await pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type="offer"))
+        pc.addTrack(FanoutTrack(bc))  # sender monitor or receiver downlink — same separated timeline
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=data["sdp"], type="offer"))
         await pc.setLocalDescription(await pc.createAnswer())
         await ws.send(json.dumps({"type": "signal", "to": sender_id,
                                   "data": {"type": "answer", "sdp": pc.localDescription.sdp}}))
@@ -483,7 +711,7 @@ def web():
                     async for raw in ws:
                         msg = json.loads(raw)
                         if msg.get("type") == "signal" and (msg.get("data") or {}).get("type") == "offer":
-                            await handle_ws_offer(ws, msg["from"], msg["data"]["sdp"])
+                            await handle_ws_offer(ws, msg["from"], msg["data"])
             except Exception as e:
                 log.warning("ws session loop reconnecting: %s", e)
                 await asyncio.sleep(3)

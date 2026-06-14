@@ -170,15 +170,34 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
 - **(d)** *"The plugin is a native WebRTC client to the GPU — the audio callback only moves samples
   across lock-free FIFOs, and a worker thread does Opus + ICE/DTLS/SRTP and the HTTP signalling."*
 
-### ⏳ Remaining — plugin DAW listen · receiver fan-out/sharing UI · coturn relay-to-self
-- The plugin **builds with its WebRTC client**; what's left is the **DAW/Standalone listen** to
-  confirm the audio (autonomous testing can't drive real audio I/O). The container is a `/ws`
-  session peer (presence-verified); a multi-listener **receiver fan-out + sharing UI** on the
-  account system is still to build. The coturn **relay-to-self** fix (two symmetric-NAT peers) is
+### ✅ Data-plane receiver fan-out — sender's separated audio reaches assigned peers (verified)
+- **(b)** This closes the control/data-plane loop: peer *assignment* (the `shares` table) now drives
+  actual audio *delivery*. The container is a **fan-out hub** ([`gpu/relaysplit_live.py`](gpu/relaysplit_live.py)):
+  a `Broadcast` (one `OnlineSeparator` writing a shared, trimmed 48 kHz timeline, keyed by channel id)
+  plus N independent `FanoutTrack` readers — the sender's own monitor **and** every receiver, each
+  with its own read cursor that locks to the live edge. aiortc tracks are single-consumer, so this
+  one-producer / many-cursor split is exactly what lets a separated stream fan out.
+- **Endpoints:** `POST /offer {channel}` (sender feeds a named broadcast + monitors), `POST /subscribe
+  {channel}` (receiver, Modal-direct downlink, no uplink), `GET /listen?channel=` (a tune-in page),
+  `GET /live` (what's on air). The web app wires **▶ Broadcast this** on each owned channel and
+  **▶ Tune in** on each *shared-with-me* entry ([`server/public/index.html`](server/public/index.html)).
+  The VPS `/ws` path is channel/`recv`-aware too, so receivers can also signal through the control plane.
+- **(c)** Demonstrates an SFU-shaped design without a full SFU: the GPU does the work once and the
+  result is multicast to listeners over best-path WebRTC (direct/srflx/TURN per peer).
+- **(d)** *Verified end-to-end in-browser:* a sender looping the demo track on a channel + a separate
+  receiver subscribing to it → receiver got the **separated vocal** (sustained RMS ≈ 0.10, peak ≈ 0.49),
+  live inference ≈ 150 ms, `/live` showing `subscribers: 2` (monitor + receiver) on one live broadcast.
+
+### ⏳ Remaining — plugin receive mode · plugin DAW listen · coturn relay-to-self
+- The plugin **builds with its WebRTC client** and **assigns peers** (session-aware matrix); what's
+  left is the **receive mode** (a plugin instance tuning into a peer's broadcast via `/subscribe`,
+  symmetric to the web `/listen`) and the **DAW/Standalone listen** to confirm audio (autonomous
+  testing can't drive real audio I/O). The coturn **relay-to-self** fix (two symmetric-NAT peers) is
   optional and was gated by a safety guardrail on the shared TURN service.
-- **Interview-honest:** "the live round-trip, control plane incl. accounts, GPU model, latency
-  meter, always-on demo, `/ws` session peering, and the native plugin all build and are deployed;
-  the plugin's audio just needs a DAW listen on my machine."
+- **Interview-honest:** "the live round-trip, control plane incl. accounts + sharing, GPU model,
+  latency meter, always-on demo, `/ws` session peering, and the **data-plane fan-out to receivers**
+  are deployed and verified; the native plugin builds and assigns peers — its audio + a receive mode
+  just need a DAW listen on my machine."
 
 ---
 
