@@ -17,13 +17,18 @@ Design (self-contained signalling for now; VPS /ws integration is the next slice
 import modal
 
 REGION = "uk"
-MODEL_NAME = "htdemucs"
-# Latency (measured, fp16): htdemucs inference is ~81 ms FLAT regardless of segment length on L4 (it's
-# launch-overhead-bound, not compute-bound), so past context is genuinely FREE — keep 5 s for quality —
-# and the only latency lever is the hop. The live per-chunk cost ≈ forward + ~45 ms of aiortc/event-loop
-# overhead, so the hop is sized ADAPTIVELY at startup to whatever GPU we landed on (see web()): ~0.15 s
-# on L4, ~0.10 s on L40S/A100. CHUNK_S here is only the fallback if the startup measurement fails.
-CHUNK_S, CONTEXT_S, FADE_S = 0.15, 5.0, 0.01
+# Model: SCNet-small (ZFTurbo MSST checkpoint). Chosen over htdemucs after an A/B — ~2.5x faster forward
+# (34.8 ms vs 85.9 ms on L4) AND cleaner vocals by ear (musdb vocal SDR 9.90). Weights + config come from
+# the MSST GitHub release, baked into the image. (HS-TasNet would be lower-latency still, but has no
+# public pretrained weights.)
+SCNET_BASE = "https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/download"
+SCNET_CFG = f"{SCNET_BASE}/v.1.0.6/config_musdb18_scnet.yaml"
+SCNET_CKPT = f"{SCNET_BASE}/v.1.0.6/scnet_checkpoint_musdb18.ckpt"
+# Latency (measured, fp16): inference is ~flat regardless of segment length (launch-overhead-bound), so
+# past context is FREE — keep 5 s for quality — and the hop is the only latency lever. The hop is sized
+# ADAPTIVELY at startup from the measured per-chunk cost (see web()): ~0.10 s with SCNet on L4/L40S.
+# CHUNK_S here is only the fallback if the startup measurement fails.
+CHUNK_S, CONTEXT_S, FADE_S = 0.12, 5.0, 0.01
 MODEL_SR, WEBRTC_SR = 44100, 48000
 TURN_ENDPOINT = "https://relaysplit.vaguelystrange.com/api/turn"
 
@@ -79,12 +84,6 @@ class OnlineSeparator:
         return out
 
 
-def _bake_model():
-    from demucs.pretrained import get_model
-
-    get_model(MODEL_NAME)
-
-
 DEMO_TRACK = "/demo-track.ogg"  # baked public-domain clip for the always-on /demo feed
 
 
@@ -101,17 +100,30 @@ def _bake_demo():
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
+    .apt_install("git", "wget", "ffmpeg")
     .pip_install(
         "numpy<2",
         "torch==2.4.1",
         "torchaudio==2.4.1",
-        "demucs==4.0.1",
+        "demucs==4.0.1",  # kept so MSST's loader imports cleanly; htdemucs weights no longer baked
         "aiortc==1.9.0",
         "av==12.3.0",
         "fastapi[standard]==0.115.4",
         "websockets==12.0",
+        "omegaconf",
+        "ml_collections",
+        "einops",
+        "librosa",
+        "scipy",
+        "soundfile",
+        "tqdm",
+        "pyyaml",
     )
-    .run_function(_bake_model)
+    .run_commands(
+        "git clone --depth 1 https://github.com/ZFTurbo/Music-Source-Separation-Training /root/msst",
+        f"wget -q '{SCNET_CFG}' -O /root/scnet.yaml",
+        f"wget -q '{SCNET_CKPT}' -O /root/scnet.ckpt",
+    )
     .run_function(_bake_demo)
 )
 
@@ -363,12 +375,12 @@ def web():
     import uuid
     from fractions import Fraction
 
+    import sys
+
     import av
     import numpy as np
     import torch
     import websockets
-    from demucs.apply import apply_model
-    from demucs.pretrained import get_model
     from aiortc import MediaStreamTrack, RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
     from fastapi import FastAPI, Request
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -378,36 +390,52 @@ def web():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda":
-        # Headroom matters: the chunk hop is 250 ms, so inference must stay well under that or the
-        # real-time stream starves and the audio turns jumpy. TF32 + fp16 autocast roughly halve the
-        # conv cost on the L4/Ada (and A10G/L40S/A100) with no audible quality change; cudnn.benchmark
-        # picks the fastest kernels for our (now steady) segment size.
+        # TF32 + fp16 autocast roughly halve the conv cost on Ada/Ampere with no audible quality change;
+        # cudnn.benchmark picks the fastest kernels for our (steady) segment size. Headroom matters: the
+        # per-chunk cost must stay under the hop or the real-time stream starves and the audio gets jumpy.
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
-    model = get_model(MODEL_NAME).to(device).eval()
-    sources = list(model.sources)
-    voc_idx = sources.index("vocals")
-    log.info("model loaded on %s; sources=%s", device, sources)
 
-    # All inference goes through ONE worker thread: a single GPU can't truly run two separations at
-    # once, so serialising avoids thrash when several broadcasts are live (each would otherwise launch
-    # its own concurrent apply_model). It also keeps GPU work off the event loop entirely.
+    # SCNet (ZFTurbo MSST) loaded from the baked config + checkpoint.
+    sys.path.insert(0, "/root/msst")
+    from utils.settings import get_model_from_config
+
+    model, mcfg = get_model_from_config("scnet", "/root/scnet.yaml")
+    state = torch.load("/root/scnet.ckpt", map_location="cpu")
+    for _k in ("state", "state_dict", "model_state_dict"):
+        if isinstance(state, dict) and _k in state:
+            state = state[_k]
+    model.load_state_dict(state)
+    model = model.to(device).eval()
+    instruments = list(mcfg.training.instruments)
+    voc_idx = instruments.index("vocals")
+    log.info("SCNet loaded on %s; instruments=%s", device, instruments)
+
+    # All inference goes through ONE worker thread: a single GPU can't truly run two separations at once,
+    # so serialising avoids thrash when several broadcasts are live. It also keeps GPU work off the loop.
     from concurrent.futures import ThreadPoolExecutor
-    gpu_exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="demucs")
+    gpu_exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scnet")
+
+    # Always run the model on a FIXED-length input. SCNet's model() takes the raw segment (no mean/std
+    # norm — it normalises internally, matching MSST's demix, which is the version we A/B'd and preferred),
+    # but it's an STFT net with cudnn.benchmark on: a varying input length (context fill + adaptive hop)
+    # makes cudnn re-tune every call and inference spikes 5-10x. Padding every segment to one length keeps
+    # exactly one kernel warm → stable, fast inference. FIXED_SEG ≥ the max possible segment (ctx+maxhop+fade).
+    FIXED_SEG = int((CONTEXT_S + 0.30) * MODEL_SR)
 
     def sep_voc(seg_np):
-        seg = torch.from_numpy(np.ascontiguousarray(seg_np))
-        ref = seg.mean(0)
-        mean, std = ref.mean(), ref.std() + 1e-8
-        x = (seg - mean) / std
+        seg = torch.from_numpy(np.ascontiguousarray(seg_np))  # (2, n)
+        n = min(seg.shape[1], FIXED_SEG)
+        if seg.shape[1] < FIXED_SEG:
+            seg = torch.nn.functional.pad(seg, (0, FIXED_SEG - seg.shape[1]))  # zero-pad AFTER the audio
         with torch.no_grad():
             if device == "cuda":
                 with torch.autocast("cuda", dtype=torch.float16):
-                    out = apply_model(model, x[None].to(device), split=False, device=device)[0]
+                    out = model(seg[None].to(device))
             else:
-                out = apply_model(model, x[None].to(device), split=False, device=device)[0]
-        return (out.float() * std + mean)[voc_idx].cpu().numpy()
+                out = model(seg[None].to(device))
+        return out[0, voc_idx, :, :n].float().cpu().numpy()  # crop back to the real n samples
 
     # Adaptive hop: size the chunk to whatever GPU we landed on. The live per-chunk cost is
     # forward + ~OVERHEAD (aiortc SRTP/RTP + numpy on the event loop, GPU-independent); keep the hop a
@@ -427,16 +455,7 @@ def web():
             per_chunk_ms = (time.perf_counter() - t0) * 1000 / 3
             # hop = ~30% above the measured per-chunk cost, so the stream never falls behind real time
             chunk_s = min(0.25, max(0.10, round(per_chunk_ms * 1.3 / 1000, 2)))
-            # one-time breakdown (forward-only vs full) to see where the per-chunk time goes
-            wt = torch.from_numpy(warm)[None].to(device)
-            ref = wt[0].mean(0); m, s = ref.mean(), ref.std() + 1e-8
-            t1 = time.perf_counter()
-            with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
-                _ = apply_model(model, (wt[0] - m) / s, split=False, device=device)
-            torch.cuda.synchronize()
-            fwd_only = (time.perf_counter() - t1) * 1000
-            log.info("warmup: per-chunk=%.0f ms (forward_only=%.0f ms) -> adaptive hop=%.0f ms",
-                     per_chunk_ms, fwd_only, chunk_s * 1000)
+            log.info("warmup: per-chunk=%.0f ms -> adaptive hop=%.0f ms", per_chunk_ms, chunk_s * 1000)
         except Exception as e:
             log.warning("gpu warmup/measure failed: %s", e)
     jitter_s = max(0.06, round(0.6 * chunk_s, 2))  # cushion < 1 hop: covers timing jitter, less latency
