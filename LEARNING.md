@@ -140,16 +140,19 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
   that mints the ephemeral TURN credentials."*
 
 ### ✅ Full-stack web app + automated test
-- **(b)** [`server/public/index.html`](server/public/index.html) — register/login, channel CRUD,
-  live presence, and a launch button to the separator, all on the accounts API (token in
+- **(b)** [`server/public/index.html`](server/public/index.html) — register/login, **peers
+  (invite/manage)**, channel CRUD, **assigning peers to a broadcast (channel sharing)** + shared-
+  with-me, live presence, and a launch button to the separator — all on the accounts API (token in
   localStorage). [`gpu/relaysplit_test_client.py`](gpu/relaysplit_test_client.py) — an aiortc client
   that round-trips audio through the live container (a CI-able data-plane regression test).
 - **(c)** Full-stack: one person built the GPU service, the control plane, the accounts layer, AND
   the web UI — the brief's "combo" claim, evidenced.
-- **(d) TURN finding worth raising:** the Modal↔Modal test surfaced that **relay↔relay between two
-  symmetric-NAT peers on the same coturn fails** (coturn won't relay to its own external IP by
-  default). Real clients from normal networks get a reachable `srflx`, so the live path is
-  unaffected — a precise NAT/TURN insight, not a vague "WebRTC is hard."
+- **(d) TURN/NAT finding worth raising:** I verified with coturn **verbose logs** that coturn *does*
+  allow relay↔relay (CHANNEL_BIND to its own relay IP succeeds); the Modal↔Modal test fails at the
+  **aiortc** level when both peers are symmetric-NAT (the client receives a few packets but sends
+  none out its relay, then tears down). Real clients from a normal network get a reachable `srflx`,
+  so the live path is unaffected — a precise NAT/TURN diagnosis from the TURN logs, not a vague
+  "WebRTC is hard."
 
 ### ✅ C++ / JUCE plugin with a native WebRTC client (builds; DAW audio test pending)
 - **(b)** [`plugin/`](plugin/) — VST3 + Standalone (CMake + MSVC 2026). [`WebRtcClient.cpp`](plugin/src/WebRtcClient.cpp)
