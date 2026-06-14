@@ -1,72 +1,54 @@
-# Plugin Phase 2 — the native WebRTC client (implementation + build plan)
+# Plugin Phase 2 — native WebRTC client (BUILT)
 
-Phase 1 (the building plugin foundation + real-time architecture + latency-meter UI) is done.
-Phase 2 makes the plugin a **native WebRTC peer** to the Modal container — the same flow the
-browser client already uses successfully, just in C++. This is the one remaining piece, and it is
-**DAW-gated** (audio can only be verified by loading it in a DAW / running the Standalone and
-listening), so it's documented here precisely rather than half-built.
+The plugin is now a native WebRTC peer to the Modal separator: it builds as **VST3 + Standalone**,
+captures the track's audio, ships it to the warm UK GPU over WebRTC (Opus), and plays back the
+separated vocal — with a latency meter. **The audio round-trip still needs a DAW/Standalone test on
+your machine** (autonomous testing can't drive real audio I/O), but it's compiled, linked, and the
+runtime DLLs are deployed.
 
-## Architecture (mirrors the working browser client)
+## Architecture (as built)
 
 ```
- audio thread (processBlock)            worker thread (WebRtcClient)
+ audio thread (processBlock)            WebRtcClient worker thread
  ──────────────────────────            ───────────────────────────────────────────────
- input  → [lock-free FIFO] ──────────▶ Opus encode → libdatachannel track.send (RTP)
- output ← [lock-free FIFO] ◀────────── Opus decode ← track.onMessage (RTP)         │
-   (only copies + meters;                signalling: GET /ice, POST /offer (JUCE URL)│
-    never blocks/allocs/locks)           PeerConnection: ICE/DTLS/SRTP via TURN ─────┘
+ input  → [StereoFifo] ──────────────▶ Opus encode (20 ms) → libdatachannel Track.sendFrame (RTP)
+ output ← [StereoFifo] ◀────────────── Opus decode ← onMessage (parse RTP) ← Track
+   (only interleave/copy;               signalling: GET /ice, POST /offer (juce::URL → WinINet)
+    never blocks/allocs/locks)          PeerConnection: ICE/DTLS/SRTP, TURN-relayed
 ```
 
-- **Lock-free handoff:** `juce::AbstractFifo` (two: to-network, from-network), `float` stereo.
-  `processBlock` only writes input / reads output / updates the atomic meters. Everything else is
-  off-thread. This is the audio-engineering showcase (no lock/alloc/socket on the callback).
-- **Signalling = identical to the browser:** `GET <container>/ice` for the ICE servers (the
-  container proxies the VPS `/api/turn`), then `POST <container>/offer` with the local SDP, apply
-  the answer. Use `juce::URL` (works on Windows via WinINet; `JUCE_USE_CURL=0` is fine).
-- **Media:** Opus @ 48 kHz/2ch to match the aiortc container (payload type 111). libdatachannel's
-  `rtc::Track` + `OpusRtpPacketizer` to send; `RtcpReceivingSession` + `track->onMessage` to
-  receive RTP, then Opus-decode.
-- **Connect → warm → ready:** the Connect button starts the session; show `connecting` until the
-  first separated audio arrives, then `connected` + the live RTT/inference meter (RTT from the
-  PeerConnection stats; inference from a data channel, as the browser does).
+- [`src/StereoFifo.h`](src/StereoFifo.h) — lock-free SPSC stereo float FIFO (`juce::AbstractFifo`).
+- [`src/WebRtcClient.{h,cpp}`](src/WebRtcClient.cpp) — PeerConnection + Opus enc/dec + signalling,
+  all on a worker thread; libdatachannel/Opus hidden behind a pImpl.
+- [`src/PluginProcessor.cpp`](src/PluginProcessor.cpp) — `processBlock` only interleaves input into
+  the to-net FIFO and reads separated audio from the from-net FIFO (silence while warming).
 
-## Build blocker found (and how to clear it)
+## Build
 
-Adding libdatachannel + Opus via CMake `FetchContent` got as far as fetching everything (incl.
-submodules), then failed at configure:
+Needs **vcpkg** with libdatachannel (srtp/media feature) + Opus, both already installed at `C:\vcpkg`:
 
-```
-Could NOT find MbedTLS ... (libdatachannel/deps/libsrtp/CMakeLists.txt: find_package(MbedTLS))
+```powershell
+$cmake = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+& $cmake -S plugin -B plugin/build -G "Visual Studio 18 2026" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+& $cmake --build plugin/build --config Release --target RelaySplit_Standalone   # or RelaySplit_VST3
 ```
 
-i.e. with `USE_MBEDTLS=ON`, libdatachannel builds mbedTLS as a subproject, but its vendored
-**libsrtp does its own `find_package(MbedTLS)`** which fails (no installed mbedTLS to find).
-(Also: CMake 4.2 needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` for the old bundled `plog`.)
+Two MSVC/vcpkg-DLL fixes are baked into `CMakeLists.txt`: `/FORCE:MULTIPLE` (libdatachannel.dll and
+juce_core both define `std::vector<std::byte>` — same instantiation) and `VST3_AUTO_MANIFEST FALSE`
+(skip the load-to-generate moduleinfo step). The receive path parses RTP manually because the
+depacketizer template isn't exported from the DLL. (A `x64-windows-static-md` triplet would remove
+the need for `/FORCE:MULTIPLE`; left as a hardening option.)
 
-Resolution options, easiest first:
-1. **OpenSSL via vcpkg** (recommended): `vcpkg install openssl libdatachannel opus`, then configure
-   with `-DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake` and link the vcpkg
-   targets. Avoids the bundled-mbedTLS/libsrtp clash entirely.
-2. **Prebuilt libdatachannel**: download a Windows release and link it (skip building deps).
-3. **Fix the bundled build**: point libsrtp at the built mbedTLS (set `MbedTLS_*` cache vars /
-   `CMAKE_PREFIX_PATH`), or disable libsrtp's own TLS detection and pass libdatachannel's.
+## Test (your machine)
 
-Once libdatachannel + Opus link, re-add them to `CMakeLists.txt` (see the commented block there)
-and build `RelaySplit_Standalone`.
+1. **Standalone (easiest):** run `plugin\build\RelaySplit_artefacts\Release\Standalone\RelaySplit.exe`
+   (the runtime DLLs sit beside it). Set the audio device to **48 kHz**, pick an input, click
+   **Connect**. You should hear the isolated vocal back, and the meter should show net RTT +
+   inference (~13 ms / ~118 ms, matching the browser client).
+2. **VST3:** copy `plugin\build\RelaySplit_artefacts\Release\VST3\RelaySplit.vst3` to your VST3 folder
+   (the bundle already contains its DLLs in `Contents\x86_64-win`). Load on a 48 kHz track, play a
+   song, Connect.
 
-## Implementation checklist
-
-- [ ] `src/Fifo.h` — `juce::AbstractFifo`-backed lock-free stereo float FIFO.
-- [ ] `src/WebRtcClient.{h,cpp}` — PeerConnection lifecycle, Opus enc/dec, RTP send/recv, the
-      `GET /ice` + `POST /offer` signalling (`juce::URL`), RTT + inference reporting.
-- [ ] `PluginProcessor` — own a `WebRtcClient` + two FIFOs; `processBlock` does only FIFO copies +
-      meter writes; `connectButton` starts/stops the client; feed `netRttMs`/`inferenceMs` atomics.
-- [ ] Point the client at the live container (`https://blitzncs--relaysplit-live-web.modal.run`).
-
-## DAW test plan
-
-1. Build `RelaySplit_Standalone` (quickest — no DAW) or `RelaySplit_VST3`.
-2. Standalone: pick an input device / play a track into it; click Connect.
-3. Expect: the isolated **vocal** returns in real time; the meter shows net RTT + inference
-   (target ~13 ms RTT / ~118 ms inference, matching the browser client).
-4. VST3: load on a track in your DAW, play a song, Connect — same result, in-session.
+It targets the live container's self-contained `/offer` path
+(`https://blitzncs--relaysplit-live-web.modal.run`). Known follow-ups: host sample-rate ≠ 48 kHz
+needs resampling (assumed 48 kHz for now); RTT via `pc.rtt()`.

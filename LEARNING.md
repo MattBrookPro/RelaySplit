@@ -151,24 +151,27 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
   default). Real clients from normal networks get a reachable `srflx`, so the live path is
   unaffected — a precise NAT/TURN insight, not a vague "WebRTC is hard."
 
-### 🟡 C++ / JUCE plugin — foundation builds (Phase 1); WebRTC client = Phase 2 (designed, DAW-gated)
-- **(b)** [`plugin/`](plugin/) — JUCE plugin (VST3 + Standalone) built with CMake + MSVC 2026.
-- **(c)** Proves the JD's C++/JUCE, cross-platform CMake build, and VST/AU/AAX-formats lines with a
-  real artifact. `processBlock` is real-time-safe (passthrough now; Phase 2 does only lock-free FIFO
-  moves); the latency-meter UI polls atomics. The audio-thread discipline (no lock/alloc/socket on
-  the callback) is the showcase. Phase 2 adds the WebRTC client (libdatachannel + Opus).
-- **(d)** *"It's a JUCE plugin that builds as VST3 and Standalone; the audio callback never blocks —
-  networking and inference run off-thread across lock-free FIFOs."*
+### ✅ C++ / JUCE plugin with a native WebRTC client (builds; DAW audio test pending)
+- **(b)** [`plugin/`](plugin/) — VST3 + Standalone (CMake + MSVC 2026). [`WebRtcClient.cpp`](plugin/src/WebRtcClient.cpp)
+  is a native WebRTC peer (libdatachannel + Opus via vcpkg); [`StereoFifo.h`](plugin/src/StereoFifo.h)
+  is the lock-free audio↔network handoff; `processBlock` only interleaves/copies samples.
+- **(c)** Evidences C++/JUCE, cross-platform CMake build, VST/AU/AAX formats, multithreading, AND
+  real-time discipline in one artifact: no lock/alloc/socket on the audio callback — Opus encode/
+  decode, RTP, ICE/DTLS/SRTP and the signalling all run on a worker thread. Signalling replicates
+  the browser exactly (GET /ice, POST /offer). It builds, links, and deploys its DLLs; the live
+  audio round-trip needs a DAW/Standalone listen (see [plugin/PHASE2.md](plugin/PHASE2.md)).
+- **(d)** *"The plugin is a native WebRTC client to the GPU — the audio callback only moves samples
+  across lock-free FIFOs, and a worker thread does Opus + ICE/DTLS/SRTP and the HTTP signalling."*
 
-### ⏳ Remaining — plugin WebRTC client · container↔VPS `/ws` session · hub/receiver UI
-- The **plugin's WebRTC client** (libdatachannel + Opus) is designed + documented but blocked on a
-  native dependency build (libsrtp can't find the bundled mbedTLS) and is DAW-gated — see
-  [`plugin/PHASE2.md`](plugin/PHASE2.md) for the architecture, the exact blocker, and fixes.
-  Also remaining: wiring the live container to the VPS `/ws` as a session peer (it uses
-  self-contained signalling today), and a receiver/hub/sharing UI on the account system.
-- **Interview-honest:** "the live round-trip, control plane *including accounts*, GPU model, latency
-  meter, and a one-click always-on demo all work and are deployed; the native plugin client is
-  architected and documented but needs the WebRTC library built and DAW testing."
+### ⏳ Remaining — plugin DAW listen · receiver fan-out/sharing UI · coturn relay-to-self
+- The plugin **builds with its WebRTC client**; what's left is the **DAW/Standalone listen** to
+  confirm the audio (autonomous testing can't drive real audio I/O). The container is a `/ws`
+  session peer (presence-verified); a multi-listener **receiver fan-out + sharing UI** on the
+  account system is still to build. The coturn **relay-to-self** fix (two symmetric-NAT peers) is
+  optional and was gated by a safety guardrail on the shared TURN service.
+- **Interview-honest:** "the live round-trip, control plane incl. accounts, GPU model, latency
+  meter, always-on demo, `/ws` session peering, and the native plugin all build and are deployed;
+  the plugin's audio just needs a DAW listen on my machine."
 
 ---
 

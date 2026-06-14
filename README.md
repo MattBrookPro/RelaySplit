@@ -13,7 +13,7 @@ GPU can sit inside a real-time audio path.
 | **Signalling / control server** | VPS, under `pm2` on `:8080` | ✅ live (nginx TLS → `:8080`) — [`server/`](server/) |
 | **TURN relay** | VPS (coturn) | ✅ as-built; ephemeral creds minted by the server |
 | **Web app** (login / channels / presence / launch) | served by VPS nginx | ✅ live at the root ([`server/public/index.html`](server/public/index.html)) |
-| **JUCE plugin** (WebRTC client + latency meter) | this Windows workstation | 🟡 foundation builds — VST3 + Standalone ([`plugin/`](plugin/)); WebRTC client next |
+| **JUCE plugin** (native WebRTC client + latency meter) | this Windows workstation | ✅ builds — VST3 + Standalone ([`plugin/`](plugin/)); DAW audio listen pending |
 
 ### Latency-critical fact
 
@@ -37,8 +37,9 @@ The latency-critical path is a **UK↔UK** connection to Modal, so the Modal GPU
 4. ✅ **Browser ↔ Modal LIVE** — real-time vocal separation through the GPU with a latency meter ([`gpu/relaysplit_live.py`](gpu/relaysplit_live.py)).
 5. ✅ **Separation model** — Demucs v4 on GPU, streaming 0.25 s chunk / 5 s context / 20 ms crossfade, real-time.
 6. ✅ **Accounts/sessions/channels** (SQLite) + ✅ one-click always-on **`/demo`** feed.
-7. 🟡 **JUCE plugin** foundation builds ([`plugin/`](plugin/)); WebRTC client designed + DAW-gated ([`plugin/PHASE2.md`](plugin/PHASE2.md)).
-8. ⏳ Remaining: plugin WebRTC client (build libdatachannel), container↔`/ws` session, hub/receiver/sharing UI.
+7. ✅ **JUCE plugin** native WebRTC client builds (VST3 + Standalone, libdatachannel + Opus via vcpkg, [`plugin/PHASE2.md`](plugin/PHASE2.md)); DAW audio listen pending.
+8. ✅ Container is a **VPS `/ws` session peer** (presence-verified) + `/session` page.
+9. ⏳ Remaining: plugin DAW listen, receiver fan-out/sharing UI, coturn relay-to-self.
 
 ## Repo layout
 
