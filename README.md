@@ -12,7 +12,7 @@ GPU can sit inside a real-time audio path.
 | **Modal GPU peer** | Modal (region `uk`) | ✅ **LIVE** — real-time browser↔GPU WebRTC vocal separation, Demucs v4, with latency meter ([`gpu/relaysplit_live.py`](gpu/relaysplit_live.py)) |
 | **Signalling / control server** | VPS, under `pm2` on `:8080` | ✅ live (nginx TLS → `:8080`) — [`server/`](server/) |
 | **TURN relay** | VPS (coturn) | ✅ as-built; ephemeral creds minted by the server |
-| **Web client** (`/login`, `/app`) | served by VPS nginx | 🟡 minimal landing page; full client later |
+| **Web app** (login / channels / presence / launch) | served by VPS nginx | ✅ live at the root ([`server/public/index.html`](server/public/index.html)) |
 | **JUCE plugin** (WebRTC client + latency meter) | this Windows workstation | 🟡 foundation builds — VST3 + Standalone ([`plugin/`](plugin/)); WebRTC client next |
 
 ### Latency-critical fact
