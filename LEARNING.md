@@ -73,28 +73,36 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
 - **(d)** *"It's live on a UK box over HTTPS with a TURN relay; I deploy it under pm2 and there's a
   smoke test that asserts the signalling relay still routes."*
 
-### ✅ Real-time GPU inference (causal-family Conv-TasNet)
-- **(b)** [`gpu/relaysplit_gpu.py`](gpu/relaysplit_gpu.py) — `Separator.load()` loads
-  `groadabike/ConvTasNet_DAMP-VSEP_enhboth` (asteroid Conv-TasNet, vocals/accompaniment) onto the
-  GPU once at container start (`@modal.enter`); weights baked into the image at build (`_bake_model`);
-  region `uk`.
-- **(c)** Conv-TasNet is the brief's named family (time-domain, GPU-friendly). Measured on an L4:
-  inference is **~20 ms per block regardless of block size** (whole-clip RTF 0.0035). The SAME model
-  on CPU was marginal — realtime ratio 0.63 at 1 s blocks rising to 0.97 at 64 ms — so the GPU is
-  what makes *low-latency* separation possible. (The popular DAMP-Vocals forks are TorchScript-traced
-  to CPU and can't use a GPU; the asteroid-native original can.) 8 kHz model → bandlimited vocals,
-  honest quality caveat; HS-TasNet is the full-band real-time upgrade.
+### ✅ Real-time GPU separation + the latency/quality trade-off (measured)
+- **(b)** [`gpu/relaysplit_gpu.py`](gpu/relaysplit_gpu.py) — `Separator` loads **Demucs v4
+  (htdemucs)** onto the GPU at container start (`@modal.enter`); weights baked at build
+  (`_bake_model`); region `uk`. `_stream_vocals()` is the low-latency streaming path;
+  `latency_sweep()` measures it.
+- **(c) The journey — an honest engineering story.** I first tried a *causal* Conv-TasNet
+  (`groadabike/DAMP-VSEP`) exactly as the brief asked. It ran on the GPU (~20 ms/block) but the
+  **separation was unusable** (vocal bleed, 8 kHz), and the usable causal music models have no
+  public weights (HS-TasNet, RT-STT). So I flipped the trade-off: a heavy, high-quality OFFLINE
+  model (**Demucs**) on the GPU, with latency made **honest and measured**. That's the stronger
+  story for a networked-audio company — Demucs genuinely *needs* a datacenter GPU (the light
+  Conv-TasNet ran fine on CPU; Demucs does not), the quality is a real wow, and latency is a number
+  I own. Demucs is non-causal, so to emit `[t, t+chunk]` you buffer up to `t+chunk` →
+  **algorithmic latency ≈ chunk size**; past context is *free* (better quality, no added latency);
+  compute is the per-chunk inference. Measured latency knee on an L4:
 
-  | block | GPU infer | GPU ratio | CPU ratio |
-  |------:|----------:|----------:|----------:|
-  | 1000 ms | 22 ms | 0.02 | 0.64 |
-  | 250 ms | 19 ms | 0.08 | 0.70 |
-  | 128 ms | 19 ms | 0.15 | 0.81 |
-  | 64 ms | — | — | 0.97 |
+  | chunk | algo | GPU compute/chunk | live (excl. network) |
+  |------:|-----:|------------------:|---------------------:|
+  | 2.0 s | 2000 ms | 388 ms | 2389 ms |
+  | 1.0 s | 1000 ms | 115 ms | 1115 ms |
+  | 0.5 s | 500 ms | 114 ms | 614 ms |
+  | 0.25 s | 250 ms | 115 ms | 365 ms |
 
-- **(d)** *"I keep a region-pinned Conv-TasNet warm on a GPU; it infers a block in ~20 ms flat, so
-  low-latency blocks have huge headroom. The same model on CPU runs out of headroom right at the
-  low-latency end — that's the measured case for the GPU."*
+  ~115 ms is the L4 per-chunk compute floor (fixed overhead) → a faster GPU + fp16 are the next
+  levers to push below ~365 ms + network.
+- **(d)** *"I tried the causal route the literature recommends, measured that the usable models
+  aren't there yet, and pivoted to a heavy offline model on the GPU — then drove latency down by
+  streaming small chunks with free past-context, and measured exactly where quality trades against
+  latency. The GPU is genuinely required now; the light model was marginal on CPU and the heavy one
+  is impossible there."*
 
 ### 🟡 Full latency story (instrumentation) — *control-plane half done; meter is ⏳*
 - TURN/region/warm-start are in place conceptually; the live network-RTT-vs-inference **meter** is

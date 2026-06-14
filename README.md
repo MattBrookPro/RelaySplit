@@ -9,7 +9,7 @@ GPU can sit inside a real-time audio path.
 
 | Component | Where it runs | Status |
 |-----------|---------------|--------|
-| **Modal GPU peer** | Modal (region `uk`) | 🟢 transport PASSED ([`spike/`](spike/)); separation model proven on GPU ([`gpu/`](gpu/)) — aiortc wiring next |
+| **Modal GPU peer** | Modal (region `uk`) | 🟢 transport PASSED ([`spike/`](spike/)); **Demucs v4** separation on GPU, quality confirmed ([`gpu/`](gpu/)) — streaming latency path next |
 | **Signalling / control server** | VPS, under `pm2` on `:8080` | ✅ live (nginx TLS → `:8080`) — [`server/`](server/) |
 | **TURN relay** | VPS (coturn) | ✅ as-built; ephemeral creds minted by the server |
 | **Web client** (`/login`, `/app`) | served by VPS nginx | 🟡 minimal landing page; full client later |
@@ -35,7 +35,7 @@ The latency-critical path is a **UK↔UK** connection to Modal, so the Modal GPU
 2. ✅ **Spike WebRTC → Modal** proven — audio round-trip, `relay ↔ relay`.
 3. ✅ **Node signalling/control server** live on the VPS ([`server/`](server/), pm2 + nginx TLS).
 4. 🟡 **Browser ↔ Modal** proven via the spike; multi-peer sessions over the server next.
-5. 🟡 **Causal separation model** proven on GPU ([`gpu/`](gpu/), Conv-TasNet vocals, RTF 0.0035); aiortc wiring next.
+5. 🟡 **Separation model**: pivoted to **Demucs v4** on GPU (quality confirmed); latency sweep done (~365 ms floor + network on L4); real-time aiortc wiring next.
 6. ⏳ **JUCE plugin** as WebRTC client + latency meter, then accounts/channels/hub/receiver.
 
 ## Repo layout
