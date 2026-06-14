@@ -14,6 +14,7 @@ class ControlClient
 public:
     static ControlClient& get();
     static constexpr const char* kBase = "https://relaysplit.vaguelystrange.com";
+    static constexpr const char* kLiveBase = "https://blitzncs--relaysplit-live-web.modal.run";
 
     bool isLoggedIn() const { return token.isNotEmpty(); }
     juce::String getUsername() const { return username; }
@@ -26,10 +27,17 @@ public:
     std::set<int> getShares (int channelId);
     bool setShares (int channelId, const std::set<int>& peerIds);
     std::vector<SharedBroadcast> sharedWithMe();  // broadcasts peers have shared with me (to tune into)
+    std::set<int> liveChannels();                 // channel ids currently broadcasting (from the GPU /live)
 
 private:
+    ControlClient() { loadSession(); }  // restore a saved login so it persists across DAW restarts
+
     juce::var get (const juce::String& path);
     juce::var post (const juce::String& path, const juce::var& body);
+    void maybeHandleAuthError (const juce::var& res);  // a 401 from a stale token -> auto sign-out
+    void loadSession();
+    void saveSession();
+    void clearSession();
 
     juce::String token, username;
     std::vector<Peer> cachedPeers;

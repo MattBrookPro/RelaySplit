@@ -21,7 +21,7 @@ public:
         P = (int) peers.size();
         rows = (int) insts.size();
 
-        groupLabel.setText ("Group apply →", juce::dontSendNotification);
+        groupLabel.setText ("Group apply:", juce::dontSendNotification);
         groupLabel.setColour (juce::Label::textColourId, juce::Colours::grey);
         addAndMakeVisible (groupLabel);
         for (auto& pr : peers)
@@ -44,7 +44,7 @@ public:
 
             for (auto& pr : peers)
             {
-                auto* chip = new juce::TextButton (pr.name);
+                auto* chip = new juce::TextButton (pr.name);  // green = assigned (no glyphs → no tofu)
                 styleChip (chip, proc->getAssignedPeers().count (pr.id) > 0);
                 chip->onClick = [this, proc, id = pr.id]
                 {

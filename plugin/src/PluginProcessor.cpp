@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <atomic>
+#include <thread>
 
 static std::atomic<int> instanceCounter { 0 };
 
@@ -73,11 +74,11 @@ void RelaySplitProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     if (uplinkEnabled.load())
     {
         for (int i = 0; i < n; ++i) { scratch[(size_t) i * 2] = l[i]; scratch[(size_t) i * 2 + 1] = r[i]; }
-        toNetwork.push (scratch, n);
+        toNetwork->push (scratch, n);
     }
 
     // (b) replace the output with the separated audio coming back; silence on underrun (warming up).
-    const int got = fromNetwork.pop (scratch, n);
+    const int got = fromNetwork->pop (scratch, n);
     for (int i = 0; i < got; ++i) { l[i] = scratch[(size_t) i * 2]; r[i] = scratch[(size_t) i * 2 + 1]; }
     for (int i = got; i < n; ++i) { l[i] = 0.0f; r[i] = 0.0f; }
 }
@@ -107,11 +108,13 @@ void RelaySplitProcessor::connect()
 
 void RelaySplitProcessor::disconnect()
 {
-    if (client != nullptr)
-    {
-        client->disconnect();
-        client.reset();
-    }
+    if (client == nullptr) return;
+    // The blocking part of teardown is the worker join, which can stall if the worker is mid-HTTP
+    // (the connecting phase). Do it on a detached thread so the message thread returns instantly —
+    // the UI flips to "Connect" right away. Safe because the FIFOs are shared_ptrs: the dying worker
+    // keeps them alive via its own refs until it finishes, even if the processor is gone by then.
+    client->requestStop();
+    std::thread ([c = std::move (client)]() mutable { c.reset(); }).detach();
 }
 
 juce::AudioProcessorEditor* RelaySplitProcessor::createEditor() { return new RelaySplitEditor (*this); }

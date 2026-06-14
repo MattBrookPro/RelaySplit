@@ -18,26 +18,33 @@ public:
     // Broadcast: send this track's input up + monitor the separated stream back (POST /offer).
     // Receive:   downlink only — tune into a peer's broadcast, no uplink audio (POST /subscribe).
     enum class Mode { Broadcast, Receive };
+    enum class Status { Disconnected, Connecting, Connected };
 
-    WebRtcClient (StereoFifo& toNetwork, StereoFifo& fromNetwork);
+    // FIFOs are shared so a still-running worker can be torn down off the message thread without
+    // outliving its buffers (the processor keeps its own refs; whichever ref dies last frees them).
+    WebRtcClient (std::shared_ptr<StereoFifo> toNetwork, std::shared_ptr<StereoFifo> fromNetwork);
     ~WebRtcClient();
 
     // non-blocking: spins the worker + signalling. `channel` keys the broadcast (empty = private solo).
     void connect (const std::string& baseUrl, Mode mode = Mode::Broadcast, const std::string& channel = {});
-    void disconnect();
+    void disconnect();                       // blocking: stop + join (used on teardown)
+    void requestStop() { stopFlag = true; }  // non-blocking: ask the worker to exit
 
+    Status status() const { return connected ? Status::Connected
+                                  : (connecting ? Status::Connecting : Status::Disconnected); }
     bool  isConnected() const  { return connected.load(); }
+    bool  isConnecting() const { return connecting.load(); }
     float rttMs() const        { return rttMsAtomic.load(); }
     float inferenceMs() const  { return inferenceMsAtomic.load(); }
 
 private:
     void run (std::string baseUrl, Mode mode, std::string channel);  // worker-thread body
 
-    StereoFifo& toNet;
-    StereoFifo& fromNet;
+    std::shared_ptr<StereoFifo> toNet, fromNet;
     std::thread worker;
-    std::atomic<bool>  connected { false };
-    std::atomic<bool>  stopFlag  { false };
+    std::atomic<bool>  connected  { false };
+    std::atomic<bool>  connecting { false };
+    std::atomic<bool>  stopFlag   { false };
     std::atomic<float> rttMsAtomic { 0.0f };
     std::atomic<float> inferenceMsAtomic { 0.0f };
 

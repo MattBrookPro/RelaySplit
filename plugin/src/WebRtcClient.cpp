@@ -24,8 +24,8 @@ struct WebRtcClient::Impl
     }
 };
 
-WebRtcClient::WebRtcClient (StereoFifo& toNetwork, StereoFifo& fromNetwork)
-    : toNet (toNetwork), fromNet (fromNetwork), impl (std::make_unique<Impl>()) {}
+WebRtcClient::WebRtcClient (std::shared_ptr<StereoFifo> toNetwork, std::shared_ptr<StereoFifo> fromNetwork)
+    : toNet (std::move (toNetwork)), fromNet (std::move (fromNetwork)), impl (std::make_unique<Impl>()) {}
 
 WebRtcClient::~WebRtcClient() { disconnect(); }
 
@@ -33,6 +33,7 @@ void WebRtcClient::connect (const std::string& baseUrl, Mode mode, const std::st
 {
     if (worker.joinable()) return;
     stopFlag = false;
+    connecting = true;  // reflected in the UI immediately so the button doesn't look dead
     worker = std::thread ([this, baseUrl, mode, channel] { run (baseUrl, mode, channel); });
 }
 
@@ -41,6 +42,7 @@ void WebRtcClient::disconnect()
     stopFlag = true;
     if (worker.joinable()) worker.join();
     connected = false;
+    connecting = false;
 }
 
 // --- signalling over plain HTTP (juce::URL → WinINet on Windows, no curl needed) ---------------
@@ -113,7 +115,9 @@ void WebRtcClient::run (std::string baseUrl, Mode mode, std::string channel)
         impl->pc = std::make_shared<rtc::PeerConnection> (config);
         impl->pc->onStateChange ([this] (rtc::PeerConnection::State s)
         {
-            connected = (s == rtc::PeerConnection::State::Connected);
+            const bool up = (s == rtc::PeerConnection::State::Connected);
+            connected = up;
+            if (up) connecting = false;  // arrived
         });
 
         int err = 0;
@@ -149,7 +153,7 @@ void WebRtcClient::run (std::string baseUrl, Mode mode, std::string channel)
             if (pkt.size() <= off) return;
             float pcm[5760 * 2];                           // up to 120 ms @ 48 kHz stereo
             const int n = opus_decode_float (impl->dec, b + off, (opus_int32) (pkt.size() - off), pcm, 5760, 0);
-            if (n > 0) fromNet.push (pcm, n);
+            if (n > 0) fromNet->push (pcm, n);
         });
 
         // Stats channel: the container reports per-chunk inference time as {"infer_ms": N}.
@@ -195,9 +199,9 @@ void WebRtcClient::run (std::string baseUrl, Mode mode, std::string channel)
             std::vector<unsigned char> packet (4000);
             while (! stopFlag)
             {
-                if (toNet.numReady() >= 960 && impl->track && impl->track->isOpen())
+                if (toNet->numReady() >= 960 && impl->track && impl->track->isOpen())
                 {
-                    toNet.pop (in.data(), 960);
+                    toNet->pop (in.data(), 960);
                     const int bytes = opus_encode_float (impl->enc, in.data(), 960, packet.data(), (opus_int32) packet.size());
                     if (bytes > 0)
                     {
@@ -219,6 +223,7 @@ void WebRtcClient::run (std::string baseUrl, Mode mode, std::string channel)
     catch (const std::exception& e)
     {
         juce::Logger::writeToLog (juce::String ("WebRtcClient error: ") + e.what());
-        connected = false;
     }
+    connected = false;
+    connecting = false;  // worker is exiting — clear both so the UI returns to "Connect"
 }

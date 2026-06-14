@@ -44,6 +44,9 @@ public:
     void connect();
     void disconnect();
     bool  isConnected() const  { return client != nullptr && client->isConnected(); }
+    bool  isConnecting() const { return client != nullptr && client->isConnecting(); }
+    WebRtcClient::Status connectionStatus() const
+        { return client ? client->status() : WebRtcClient::Status::Disconnected; }
     float rttMs() const        { return client ? client->rttMs() : 0.0f; }
     float inferenceMs() const  { return client ? client->inferenceMs() : 0.0f; }
 
@@ -65,8 +68,9 @@ public:
     void setReceiveChannel (int id) { receiveChannelId = id; }
 
 private:
-    StereoFifo toNetwork   { 96000 };  // ~2 s at 48 kHz
-    StereoFifo fromNetwork { 96000 };
+    // Shared with the WebRtcClient so a worker being torn down off-thread can't outlive its buffers.
+    std::shared_ptr<StereoFifo> toNetwork   { std::make_shared<StereoFifo> (96000) };  // ~2 s @ 48 kHz
+    std::shared_ptr<StereoFifo> fromNetwork { std::make_shared<StereoFifo> (96000) };
     std::unique_ptr<WebRtcClient> client;
 
     juce::String instanceName;
