@@ -80,6 +80,20 @@ def _bake_model():
     get_model(MODEL_NAME)
 
 
+DEMO_TRACK = "/demo-track.ogg"  # baked public-domain clip for the always-on /demo feed
+
+
+def _bake_demo():
+    # Bake a public-domain track into the image so /demo always has something to separate live, with
+    # no external fetch at runtime (Bessie Smith, "Downhearted Blues", 1923 — public domain).
+    import urllib.request
+
+    url = "https://commons.wikimedia.org/wiki/Special:FilePath/Bessie%20Smith%20-%20Downhearted%20Blues%20(1923).ogg"
+    req = urllib.request.Request(url, headers={"User-Agent": "RelaySplit/0.1 (demo; research)"})
+    with urllib.request.urlopen(req, timeout=90) as r, open(DEMO_TRACK, "wb") as f:
+        f.write(r.read())
+
+
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
@@ -92,6 +106,7 @@ image = (
         "fastapi[standard]==0.115.4",
     )
     .run_function(_bake_model)
+    .run_function(_bake_demo)
 )
 
 app = modal.App("relaysplit-live", image=image)
@@ -146,7 +161,16 @@ async function start(){
     dc=pc.createDataChannel("stats");
     dc.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.infer_ms!=null)setb($("inf"),d.infer_ms.toFixed(0)+" ms","ok")}catch{}};
 
-    if($("mic").checked){
+    if(window.__demo){
+      // Always-on demo: separate a baked public-domain track — no file/mic, one click only.
+      const buf=await (await fetch("demo-track")).arrayBuffer();
+      const actx=new (window.AudioContext||window.webkitAudioContext)();
+      const el=new Audio(URL.createObjectURL(new Blob([buf]))); el.loop=true;
+      const dest=actx.createMediaStreamDestination();
+      actx.createMediaElementSource(el).connect(dest);
+      await actx.resume(); await el.play();
+      srcStream=dest.stream;
+    } else if($("mic").checked){
       srcStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
     }else{
       const f=$("file").files[0]; if(!f){log("pick a file or tick mic");$("start").disabled=false;return}
@@ -205,7 +229,7 @@ def web():
     from demucs.pretrained import get_model
     from aiortc import MediaStreamTrack, RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
     from fastapi import FastAPI, Request
-    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
     logging.basicConfig(level=logging.INFO)
     log = logging.getLogger("relaysplit-live")
@@ -311,6 +335,16 @@ def web():
     @api.get("/", response_class=HTMLResponse)
     async def index():
         return INDEX_HTML
+
+    @api.get("/demo", response_class=HTMLResponse)
+    async def demo():
+        # Same page, flagged to auto-use the baked track as source — one-click live demo for an
+        # interviewer (no mic/file needed). Autoplay policy still requires the single Start click.
+        return INDEX_HTML.replace("const $=", "window.__demo=true;\nconst $=", 1)
+
+    @api.get("/demo-track")
+    async def demo_track():
+        return FileResponse(DEMO_TRACK, media_type="audio/ogg")
 
     @api.get("/ice")
     async def ice():
