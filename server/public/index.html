@@ -3,40 +3,134 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>RelaySplit — control plane</title>
+<title>RelaySplit</title>
 <style>
-  body { font: 15px/1.6 system-ui, sans-serif; max-width: 640px; margin: 48px auto; padding: 0 16px; }
-  h1 { font-size: 22px; margin-bottom: 4px; }
-  code { background: #f0f0f0; padding: 1px 5px; border-radius: 4px; }
-  .badge { display: inline-block; padding: 2px 10px; border-radius: 4px; font-family: ui-monospace, monospace; }
-  .ok { background: #d4f7d4; } .bad { background: #f7d4d4; }
-  ul { padding-left: 18px; }
+  :root { --bg:#0f1115; --card:#1a1d24; --fg:#e8e8ea; --mut:#9aa0aa; --acc:#5b8cff; --ok:#3ad29f; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 system-ui, sans-serif; }
+  .wrap { max-width: 680px; margin: 40px auto; padding: 0 18px; }
+  h1 { font-size: 24px; margin: 0 0 2px; } .sub { color:var(--mut); margin:0 0 22px; }
+  .card { background:var(--card); border:1px solid #262a33; border-radius:10px; padding:18px; margin:14px 0; }
+  h2 { font-size:15px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); margin:0 0 12px; }
+  input, select, button { font:14px system-ui; padding:9px 11px; border-radius:7px; border:1px solid #2d323c; background:#11141a; color:var(--fg); }
+  button { background:var(--acc); border:none; color:#fff; cursor:pointer; font-weight:600; }
+  button.sec { background:#2a2f3a; }
+  a.cta { display:inline-block; background:var(--ok); color:#062018; font-weight:700; padding:11px 16px; border-radius:8px; text-decoration:none; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .muted { color:var(--mut); } .err { color:#ff8a8a; } table { width:100%; border-collapse:collapse; }
+  td,th { text-align:left; padding:6px 4px; border-bottom:1px solid #262a33; } .pill{font-family:ui-monospace,monospace;font-size:12px;background:#11141a;padding:1px 7px;border-radius:5px}
+  .hide { display:none; }
 </style>
 </head>
 <body>
-<h1>RelaySplit</h1>
-<p>Control plane — <span id="status" class="badge">checking…</span></p>
-<p>Network-delivered real-time GPU audio processing. This service is the <b>control plane</b>:
-   it handles signalling, presence and ephemeral TURN credentials. Audio never passes through
-   it — that's the data plane (WebRTC, peer-to-peer or TURN-relayed).</p>
-<ul>
-  <li>WebRTC signalling: <code>wss://relaysplit.vaguelystrange.com/ws</code></li>
-  <li>Ephemeral TURN: <code>POST /api/turn</code></li>
-  <li>Presence: <code>GET /api/channels</code></li>
-</ul>
+<div class="wrap">
+  <h1>RelaySplit</h1>
+  <p class="sub">Real-time neural vocal separation over the network, on a region-pinned cloud GPU.</p>
+
+  <!-- AUTH (logged out) -->
+  <div id="auth" class="card">
+    <h2 id="authTitle">Sign in</h2>
+    <div class="row">
+      <input id="username" placeholder="username" autocomplete="username" />
+      <input id="password" type="password" placeholder="password" autocomplete="current-password" />
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button id="loginBtn">Log in</button>
+      <button id="registerBtn" class="sec">Register</button>
+      <span id="authErr" class="err"></span>
+    </div>
+  </div>
+
+  <!-- APP (logged in) -->
+  <div id="app" class="hide">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <span>Signed in as <b id="who"></b></span>
+        <button id="logout" class="sec">Log out</button>
+      </div>
+      <p style="margin:14px 0 6px">Hear it live — clean music in, isolated vocal back through the GPU:</p>
+      <div class="row">
+        <a class="cta" id="liveLink" href="#" target="_blank">▶ Open the live separator</a>
+        <a class="cta" id="demoLink" href="#" target="_blank" style="background:#2a2f3a;color:#fff">One-click demo</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Your channels</h2>
+      <table id="chTable"><tbody></tbody></table>
+      <div class="row" style="margin-top:12px">
+        <input id="chName" placeholder="channel name (e.g. Lead Vox)" />
+        <select id="chStem"><option>vocals</option><option>accompaniment</option></select>
+        <button id="chAdd">Create</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Live now (presence)</h2>
+      <div id="presence" class="muted">—</div>
+    </div>
+  </div>
+</div>
+
 <script>
-  fetch("/api/health")
-    .then((r) => r.json())
-    .then((d) => {
-      const el = document.getElementById("status");
-      el.textContent = d.status + " · " + d.time;
-      el.className = "badge ok";
-    })
-    .catch((e) => {
-      const el = document.getElementById("status");
-      el.textContent = "unreachable: " + e;
-      el.className = "badge bad";
-    });
+const LIVE = "https://blitzncs--relaysplit-live-web.modal.run";
+const $ = (id) => document.getElementById(id);
+const tok = () => localStorage.getItem("rs_token");
+const api = (path, opts={}) => fetch("/api"+path, {
+  ...opts,
+  headers: { "Content-Type":"application/json", ...(tok()?{Authorization:"Bearer "+tok()}:{}) , ...(opts.headers||{}) },
+}).then(async r => { const j = await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.error||("HTTP "+r.status)); return j; });
+
+async function auth(kind){
+  $("authErr").textContent = "";
+  try {
+    const body = JSON.stringify({ username:$("username").value, password:$("password").value });
+    const res = await api("/"+kind, { method:"POST", body });
+    localStorage.setItem("rs_token", res.token);
+    await showApp();
+  } catch(e){ $("authErr").textContent = e.message; }
+}
+$("loginBtn").onclick = ()=>auth("login");
+$("registerBtn").onclick = ()=>auth("register");
+$("logout").onclick = ()=>{ localStorage.removeItem("rs_token"); location.reload(); };
+
+$("liveLink").href = LIVE + "/";
+$("demoLink").href = LIVE + "/demo";
+
+async function showApp(){
+  let me;
+  try { me = await api("/me"); } catch { return; } // not logged in -> stay on auth
+  $("auth").classList.add("hide"); $("app").classList.remove("hide");
+  $("who").textContent = me.account.username;
+  await refreshChannels(); await refreshPresence();
+}
+
+async function refreshChannels(){
+  const { channels } = await api("/channels");
+  const tb = $("chTable").querySelector("tbody");
+  tb.innerHTML = channels.length ? "" : "<tr><td class='muted'>no channels yet</td></tr>";
+  for (const c of channels){
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${c.name}</td><td><span class="pill">${c.stem}</span></td><td class="muted">#${c.id}</td>`;
+    tb.appendChild(tr);
+  }
+}
+$("chAdd").onclick = async ()=>{
+  await api("/channels", { method:"POST", body: JSON.stringify({ name:$("chName").value, stem:$("chStem").value }) });
+  $("chName").value = ""; await refreshChannels();
+};
+
+async function refreshPresence(){
+  try {
+    const { rooms } = await api("/presence");
+    $("presence").textContent = rooms.length
+      ? rooms.map(r => `${r.room}: ${r.peers.map(p=>p.name||p.role).join(", ")}`).join("  ·  ")
+      : "nobody connected right now";
+  } catch(e){ $("presence").textContent = "—"; }
+}
+
+showApp();
+setInterval(()=>{ if(tok() && !$("app").classList.contains("hide")) refreshPresence(); }, 5000);
 </script>
 </body>
 </html>
