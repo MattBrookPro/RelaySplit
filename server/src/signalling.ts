@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "node:http";
 import { randomUUID } from "node:crypto";
 import { addPeer, removePeer, roomPeers, getPeer, type Role } from "./presence";
+import { accountForToken } from "./auth";
 
 // WebRTC signalling over WebSocket — the heart of the CONTROL plane.
 //
@@ -16,6 +17,7 @@ interface InboundJoin {
   room: string;
   role?: Role;
   name?: string;
+  token?: string; // optional session token -> ties this peer to an account
 }
 interface InboundSignal {
   type: "signal";
@@ -55,7 +57,9 @@ export function attachSignalling(server: Server): WebSocketServer {
       if (msg.type === "join") {
         room = msg.room;
         role = msg.role ?? "receiver";
-        const others = addPeer({ id: peerId, role, room, socket: ws, name: msg.name });
+        // If a session token is supplied, tag the peer with its account username (identity/presence).
+        const name = accountForToken(msg.token)?.username ?? msg.name;
+        const others = addPeer({ id: peerId, role, room, socket: ws, name });
         // Tell the joiner who's already here (whom to offer to)...
         send(ws, {
           type: "joined",
@@ -65,7 +69,7 @@ export function attachSignalling(server: Server): WebSocketServer {
         });
         // ...and tell the others that someone arrived.
         for (const p of others) {
-          send(p.socket, { type: "peer-joined", peerId, role, name: msg.name });
+          send(p.socket, { type: "peer-joined", peerId, role, name });
         }
         return;
       }

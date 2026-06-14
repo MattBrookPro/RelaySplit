@@ -2,6 +2,7 @@ import express from "express";
 import path from "node:path";
 import { mintTurnCredential } from "./turn";
 import { listRooms } from "./presence";
+import { createAccountsRouter } from "./accounts";
 
 // REST surface of the control plane. Small on purpose: health, TURN minting, presence, and the
 // static client. Everything latency-sensitive (the audio) deliberately lives elsewhere.
@@ -24,9 +25,12 @@ export function createApi(): express.Express {
   });
 
   // Presence snapshot for a control UI: which sessions are live and who's in them.
-  app.get("/api/channels", (_req, res) => {
+  app.get("/api/presence", (_req, res) => {
     res.json({ rooms: listRooms() });
   });
+
+  // Accounts / peers / channels (SQLite-backed): /api/register, /login, /me, /peers, /channels.
+  app.use("/api", createAccountsRouter());
 
   // Static client (landing/app). Kept dependency-free for now; a React client is a later slice.
   app.use(express.static(path.resolve(__dirname, "../public")));
