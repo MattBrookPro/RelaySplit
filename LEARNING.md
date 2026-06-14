@@ -167,11 +167,18 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
   **receive** a peer's broadcast — [`WebRtcClient::Mode::Receive`](plugin/src/WebRtcClient.cpp) POSTs a
   recvonly offer to `/subscribe`, runs no uplink, and `processBlock` outputs the incoming separated
   audio. The shared-with-me list comes from `ControlClient::sharedWithMe()`.
+- **Packaging finding (VST3 in a host):** the dynamic build loaded fine standalone but Cubase
+  **blocklisted** the VST3. Diagnosed with `LoadLibraryEx`, not guesswork: default DLL search →
+  `ERROR_MOD_NOT_FOUND (126)`, only `LOAD_WITH_ALTERED_SEARCH_PATH` succeeded — hosts don't add the
+  plugin's own folder to the dependency search, so the bundled `datachannel.dll` & co. weren't found.
+  Fix = **static linking** (`x64-windows-static-md`): one self-contained binary, loads in any host,
+  and it also retires `/FORCE:MULTIPLE` (a dynamic-only import-lib/obj LNK2005). Verified: the static
+  VST3 loads with the *default* search; Standalone runs.
 - **(c)** Evidences C++/JUCE, cross-platform CMake build, VST/AU/AAX formats, multithreading, AND
   real-time discipline in one artifact: no lock/alloc/socket on the audio callback — Opus encode/
   decode, RTP, ICE/DTLS/SRTP and the signalling all run on a worker thread. Signalling replicates
-  the browser exactly (GET /ice, POST /offer). It builds, links, and deploys its DLLs; the live
-  audio round-trip needs a DAW/Standalone listen (see [plugin/PHASE2.md](plugin/PHASE2.md)).
+  the browser exactly (GET /ice, POST /offer). It builds and links to a self-contained binary; the
+  live audio round-trip needs a DAW/Standalone listen (see [plugin/PHASE2.md](plugin/PHASE2.md)).
 - **(d)** *"The plugin is a native WebRTC client to the GPU — the audio callback only moves samples
   across lock-free FIFOs, and a worker thread does Opus + ICE/DTLS/SRTP and the HTTP signalling."*
 

@@ -57,8 +57,12 @@ target_link_libraries(RelaySplit
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
 
-# libdatachannel.dll exports std::vector<std::byte> symbols that also live in juce_core.obj — the
-# same instantiation, so let the linker pick one (propagates to the VST3/Standalone exe links).
-if (MSVC)
+# With the DYNAMIC triplet, libdatachannel.dll's import lib exports std::vector<std::byte> symbols that
+# also live in juce_core.obj (same instantiation), causing LNK2005 — let the linker pick one. With a
+# STATIC triplet there's no import lib and the COMDAT instantiations fold normally, so /FORCE isn't
+# needed (and avoiding it clears the LNK4088 "image may not run" warning). Static is preferred: a
+# self-contained binary loads in any host — VST3 hosts (e.g. Cubase) don't search the plugin's own
+# folder for dependent DLLs, so a dynamic build fails to load there and gets blocklisted.
+if (MSVC AND NOT VCPKG_TARGET_TRIPLET MATCHES "static")
     target_link_options(RelaySplit INTERFACE "/FORCE:MULTIPLE")
 endif()
