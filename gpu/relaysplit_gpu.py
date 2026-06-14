@@ -48,7 +48,8 @@ image = (
         "huggingface_hub==0.23.0",  # asteroid 0.7.0 needs the legacy cached_download (gone in >=0.26)
         "requests",  # asteroid.utils.hub_utils imports it but doesn't declare it
         "asteroid==0.7.0",
-        "scipy==1.13.1",  # resample_poly for 48k<->model-rate (next slice)
+        "scipy==1.13.1",  # resample_poly for 48k<->model-rate
+        "soundfile==0.12.1",  # decode/encode WAV/FLAC/OGG clips for the listen test
     )
     .run_function(_bake_model)
 )
@@ -134,9 +135,62 @@ class Separator:
             )
         return out
 
+    @modal.method()
+    def separate_clip(self, audio_bytes: bytes):
+        """Separate one clip into its two stems. Returns BOTH as 16-bit WAV bytes so the caller can
+        listen and decide which is the vocal (DAMP-VSEP source order isn't guaranteed). Whole-clip
+        offline inference — this is the quick quality listen test, not the real-time path."""
+        import io
+        import time
+        from math import gcd
+
+        import numpy as np
+        import soundfile as sf
+        from scipy.signal import resample_poly
+
+        torch = self.torch
+        audio, in_sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=True)
+        mono = audio.mean(axis=1)  # downmix to mono (the model is single-channel)
+        if int(in_sr) != self.sr:
+            g = gcd(int(in_sr), self.sr)
+            mono = resample_poly(mono, self.sr // g, int(in_sr) // g).astype("float32")
+        mono = mono[: self.sr * 30]  # cap at 30 s — enough to judge quality, avoids long-clip OOM
+
+        with torch.no_grad():
+            wav = torch.from_numpy(mono).to(self.device).unsqueeze(0)
+            t0 = time.perf_counter()
+            est = self.model(wav)
+            self._sync()
+            infer_ms = (time.perf_counter() - t0) * 1000
+        est = est.squeeze(0).cpu().numpy()  # (n_src, time)
+
+        def to_wav(x):
+            buf = io.BytesIO()
+            peak = float(np.max(np.abs(x))) or 1.0
+            sf.write(buf, (x / peak * 0.95).astype("float32"), self.sr, format="WAV", subtype="PCM_16")
+            return buf.getvalue()
+
+        return {"sr": self.sr, "infer_ms": round(infer_ms, 1), "stems": [to_wav(s) for s in est]}
+
 
 @app.local_entrypoint()
 def main():
     import json
 
     print(json.dumps(Separator().benchmark.remote(), indent=2))
+
+
+@app.local_entrypoint()
+def listen(input: str, outdir: str = "."):
+    # Offline quality test: send a real clip, get both separated stems back as WAV files to play.
+    import os
+
+    with open(input, "rb") as f:
+        data = f.read()
+    res = Separator().separate_clip.remote(data)
+    print(f"inference: {res['infer_ms']} ms  sr={res['sr']}  stems={len(res['stems'])}")
+    for i, b in enumerate(res["stems"]):
+        p = os.path.join(outdir, f"out_stem{i}.wav")
+        with open(p, "wb") as f:
+            f.write(b)
+        print("wrote", p)

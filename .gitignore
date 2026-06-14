@@ -46,3 +46,9 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Audio test artifacts (listen-test inputs/outputs)
+*.wav
+*.ogg
+*.flac
+*.mp3
