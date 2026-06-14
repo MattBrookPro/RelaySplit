@@ -29,11 +29,11 @@ WebRtcClient::WebRtcClient (StereoFifo& toNetwork, StereoFifo& fromNetwork)
 
 WebRtcClient::~WebRtcClient() { disconnect(); }
 
-void WebRtcClient::connect (const std::string& baseUrl)
+void WebRtcClient::connect (const std::string& baseUrl, Mode mode, const std::string& channel)
 {
     if (worker.joinable()) return;
     stopFlag = false;
-    worker = std::thread ([this, baseUrl] { run (baseUrl); });
+    worker = std::thread ([this, baseUrl, mode, channel] { run (baseUrl, mode, channel); });
 }
 
 void WebRtcClient::disconnect()
@@ -84,14 +84,16 @@ static rtc::Configuration fetchIceConfig (const std::string& baseUrl)
     return config;
 }
 
-static std::string postOffer (const std::string& baseUrl, const std::string& offerSdp)
+static std::string postOffer (const std::string& baseUrl, const std::string& path,
+                              const std::string& offerSdp, const std::string& channel)
 {
     auto* obj = new juce::DynamicObject();
     obj->setProperty ("type", "offer");
     obj->setProperty ("sdp", juce::String (offerSdp));
+    if (! channel.empty()) obj->setProperty ("channel", juce::String (channel));
     const juce::String body = juce::JSON::toString (juce::var (obj));
 
-    auto url = juce::URL (juce::String (baseUrl) + "/offer").withPOSTData (body);
+    auto url = juce::URL (juce::String (baseUrl) + path).withPOSTData (body);
     auto stream = url.createInputStream (
         juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
             .withExtraHeaders ("Content-Type: application/json")
@@ -102,10 +104,11 @@ static std::string postOffer (const std::string& baseUrl, const std::string& off
     return json.getProperty ("sdp", {}).toString().toStdString();
 }
 
-void WebRtcClient::run (std::string baseUrl)
+void WebRtcClient::run (std::string baseUrl, Mode mode, std::string channel)
 {
     try
     {
+        const bool recv = (mode == Mode::Receive);  // downlink only: no mic uplink, POST /subscribe
         auto config = fetchIceConfig (baseUrl);
         impl->pc = std::make_shared<rtc::PeerConnection> (config);
         impl->pc->onStateChange ([this] (rtc::PeerConnection::State s)
@@ -118,14 +121,18 @@ void WebRtcClient::run (std::string baseUrl)
         impl->dec = opus_decoder_create (48000, 2, &err);
 
         const uint32_t ssrc = 42;
-        rtc::Description::Audio media ("audio", rtc::Description::Direction::SendRecv);
+        rtc::Description::Audio media ("audio",
+            recv ? rtc::Description::Direction::RecvOnly : rtc::Description::Direction::SendRecv);
         media.addOpusCodec (111);
-        media.addSSRC (ssrc, "relaysplit");
+        if (! recv) media.addSSRC (ssrc, "relaysplit");  // only a broadcaster sends
         impl->track = impl->pc->addTrack (media);
 
-        auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig> (
-            ssrc, "relaysplit", 111, rtc::OpusRtpPacketizer::DefaultClockRate);
-        impl->track->setMediaHandler (std::make_shared<rtc::OpusRtpPacketizer> (rtpConfig));
+        if (! recv)
+        {
+            auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig> (
+                ssrc, "relaysplit", 111, rtc::OpusRtpPacketizer::DefaultClockRate);
+            impl->track->setMediaHandler (std::make_shared<rtc::OpusRtpPacketizer> (rtpConfig));
+        }
 
         // Receive: parse incoming RTP ourselves (the depacketizer template isn't exported from the
         // vcpkg DLL), strip the RTP header, Opus-decode the payload → from-network FIFO.
@@ -166,32 +173,45 @@ void WebRtcClient::run (std::string baseUrl)
         }
         std::string offerSdp;
         if (auto local = impl->pc->localDescription()) offerSdp = std::string (local->generateSdp());
-        const auto answerSdp = postOffer (baseUrl, offerSdp);
+        const auto answerSdp = postOffer (baseUrl, recv ? "/subscribe" : "/offer", offerSdp, channel);
         if (! answerSdp.empty())
             impl->pc->setRemoteDescription (rtc::Description (answerSdp, "answer"));
 
-        // Send loop: 20 ms (960-frame) Opus packets from the to-network FIFO.
-        uint32_t ts = 0;
-        std::vector<float> in ((size_t) 960 * 2);
-        std::vector<unsigned char> packet (4000);
-        while (! stopFlag)
+        if (recv)
         {
-            if (toNet.numReady() >= 960 && impl->track && impl->track->isOpen())
+            // Receiver: pure downlink — the separated audio arrives via track->onMessage above and is
+            // pushed to the from-network FIFO. Nothing to send; just keep the RTT meter fresh.
+            while (! stopFlag)
             {
-                toNet.pop (in.data(), 960);
-                const int bytes = opus_encode_float (impl->enc, in.data(), 960, packet.data(), (opus_int32) packet.size());
-                if (bytes > 0)
+                if (auto r = impl->pc->rtt()) rttMsAtomic = (float) r->count();
+                std::this_thread::sleep_for (200ms);
+            }
+        }
+        else
+        {
+            // Broadcaster send loop: 20 ms (960-frame) Opus packets from the to-network FIFO.
+            uint32_t ts = 0;
+            std::vector<float> in ((size_t) 960 * 2);
+            std::vector<unsigned char> packet (4000);
+            while (! stopFlag)
+            {
+                if (toNet.numReady() >= 960 && impl->track && impl->track->isOpen())
                 {
-                    auto* p = reinterpret_cast<std::byte*> (packet.data());
-                    impl->track->sendFrame (rtc::binary (p, p + bytes), rtc::FrameInfo (ts));
-                    ts += 960;
+                    toNet.pop (in.data(), 960);
+                    const int bytes = opus_encode_float (impl->enc, in.data(), 960, packet.data(), (opus_int32) packet.size());
+                    if (bytes > 0)
+                    {
+                        auto* p = reinterpret_cast<std::byte*> (packet.data());
+                        impl->track->sendFrame (rtc::binary (p, p + bytes), rtc::FrameInfo (ts));
+                        ts += 960;
+                    }
                 }
+                else
+                {
+                    std::this_thread::sleep_for (2ms);
+                }
+                if (auto r = impl->pc->rtt()) rttMsAtomic = (float) r->count();
             }
-            else
-            {
-                std::this_thread::sleep_for (2ms);
-            }
-            if (auto r = impl->pc->rtt()) rttMsAtomic = (float) r->count();
         }
 
         if (impl->pc) impl->pc->close();

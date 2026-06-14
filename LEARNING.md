@@ -162,6 +162,11 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
   makes every RelaySplit instance in the DAW session discoverable; [`PeerMatrix`](plugin/src/PeerMatrix.h)
   assigns any number of peers per instance and **group-edits** across selected instances;
   [`ControlClient`](plugin/src/ControlClient.cpp) logs in and syncs shares to the control plane.
+- **Broadcast / receive modes** (symmetric to the web): a broadcaster keys its stream by its own
+  channel id (so assigned peers can tune in), while the "Listen to" selector lets an instance
+  **receive** a peer's broadcast — [`WebRtcClient::Mode::Receive`](plugin/src/WebRtcClient.cpp) POSTs a
+  recvonly offer to `/subscribe`, runs no uplink, and `processBlock` outputs the incoming separated
+  audio. The shared-with-me list comes from `ControlClient::sharedWithMe()`.
 - **(c)** Evidences C++/JUCE, cross-platform CMake build, VST/AU/AAX formats, multithreading, AND
   real-time discipline in one artifact: no lock/alloc/socket on the audio callback — Opus encode/
   decode, RTP, ICE/DTLS/SRTP and the signalling all run on a worker thread. Signalling replicates
@@ -188,16 +193,16 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
   receiver subscribing to it → receiver got the **separated vocal** (sustained RMS ≈ 0.10, peak ≈ 0.49),
   live inference ≈ 150 ms, `/live` showing `subscribers: 2` (monitor + receiver) on one live broadcast.
 
-### ⏳ Remaining — plugin receive mode · plugin DAW listen · coturn relay-to-self
-- The plugin **builds with its WebRTC client** and **assigns peers** (session-aware matrix); what's
-  left is the **receive mode** (a plugin instance tuning into a peer's broadcast via `/subscribe`,
-  symmetric to the web `/listen`) and the **DAW/Standalone listen** to confirm audio (autonomous
-  testing can't drive real audio I/O). The coturn **relay-to-self** fix (two symmetric-NAT peers) is
-  optional and was gated by a safety guardrail on the shared TURN service.
+### ⏳ Remaining — plugin DAW audio listen · coturn relay-to-self
+- The plugin **builds** with its WebRTC client, **assigns peers** (session-aware matrix), and now has
+  **broadcast + receive modes**; it launches clean (Standalone loads all DLLs, no crash). What's left
+  is purely the **DAW/Standalone *audio* listen** to confirm the round-trip by ear (autonomous testing
+  can't drive real audio I/O). The coturn **relay-to-self** fix (two symmetric-NAT peers) is optional
+  and was gated by a safety guardrail on the shared TURN service.
 - **Interview-honest:** "the live round-trip, control plane incl. accounts + sharing, GPU model,
   latency meter, always-on demo, `/ws` session peering, and the **data-plane fan-out to receivers**
-  are deployed and verified; the native plugin builds and assigns peers — its audio + a receive mode
-  just need a DAW listen on my machine."
+  are deployed and verified end-to-end; the native plugin builds, assigns peers, and broadcasts/
+  receives — its audio just needs a DAW listen on my machine."
 
 ---
 

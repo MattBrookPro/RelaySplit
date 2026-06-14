@@ -68,9 +68,13 @@ void RelaySplitProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     float* l = buffer.getWritePointer (0);
     float* r = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : l;
 
-    // (a) interleave the clean input into the to-network FIFO (the WebRtcClient encodes + sends it).
-    for (int i = 0; i < n; ++i) { scratch[(size_t) i * 2] = l[i]; scratch[(size_t) i * 2 + 1] = r[i]; }
-    toNetwork.push (scratch, n);
+    // (a) Broadcaster only: interleave the clean input into the to-network FIFO (the WebRtcClient
+    // encodes + sends it). A receiver sends no uplink — it just plays the remote broadcast.
+    if (uplinkEnabled.load())
+    {
+        for (int i = 0; i < n; ++i) { scratch[(size_t) i * 2] = l[i]; scratch[(size_t) i * 2 + 1] = r[i]; }
+        toNetwork.push (scratch, n);
+    }
 
     // (b) replace the output with the separated audio coming back; silence on underrun (warming up).
     const int got = fromNetwork.pop (scratch, n);
@@ -82,7 +86,23 @@ void RelaySplitProcessor::connect()
 {
     if (client == nullptr)
         client = std::make_unique<WebRtcClient> (toNetwork, fromNetwork);
-    client->connect (kLiveUrl);
+
+    if (receiveChannelId > 0)
+    {
+        // Receiver: tune into a peer's broadcast (downlink only — don't ship this track's input).
+        uplinkEnabled = false;
+        client->connect (kLiveUrl, WebRtcClient::Mode::Receive, std::to_string (receiveChannelId));
+    }
+    else
+    {
+        // Broadcaster: key the stream by THIS instance's channel id so assigned peers can tune in
+        // (the same id the shares table — and the web "Tune in" link — use).
+        auto& cc = ControlClient::get();
+        if (cc.isLoggedIn() && channelId == 0) channelId = cc.createChannel (instanceName);
+        uplinkEnabled = true;
+        client->connect (kLiveUrl, WebRtcClient::Mode::Broadcast,
+                         channelId > 0 ? std::to_string (channelId) : std::string());
+    }
 }
 
 void RelaySplitProcessor::disconnect()

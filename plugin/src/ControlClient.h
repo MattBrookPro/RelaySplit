@@ -4,6 +4,7 @@
 #include <vector>
 
 struct Peer { int id = 0; juce::String name; };
+struct SharedBroadcast { int id = 0; juce::String name, owner; };  // a peer's broadcast I may receive
 
 // Shared (process-wide) session to the RelaySplit control plane. One account per DAW process — all
 // plugin instances use it. Calls block on the network, so invoke from the message thread on user
@@ -24,6 +25,7 @@ public:
     int  createChannel (const juce::String& name, const juce::String& stem = "vocals");  // id, or 0
     std::set<int> getShares (int channelId);
     bool setShares (int channelId, const std::set<int>& peerIds);
+    std::vector<SharedBroadcast> sharedWithMe();  // broadcasts peers have shared with me (to tune into)
 
 private:
     juce::var get (const juce::String& path);

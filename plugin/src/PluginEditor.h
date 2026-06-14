@@ -21,6 +21,7 @@ private:
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void refresh();
+    void populateReceive();   // (re)load the "shared with me" broadcasts into the Listen-to box
     void doLogin();
 
     RelaySplitProcessor& proc;
@@ -33,6 +34,11 @@ private:
     // session/connection
     juce::TextButton connectBtn { "Connect" };
     juce::Label statusLabel, rttLabel, infLabel;
+    // receive mode: which broadcast (if any) this instance tunes into
+    juce::Label receiveLabel { {}, "Listen to:" };
+    juce::ComboBox receiveBox;
+    juce::TextButton receiveRefreshBtn { juce::String::fromUTF8 ("↻") };  // ↻ reload shared list
+    std::vector<int> receiveIds;   // parallel to receiveBox items: index -> channel id (0 = broadcast)
     // peer matrix
     juce::Viewport viewport;
     PeerMatrix matrix;

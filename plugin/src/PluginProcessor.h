@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_audio_utils/juce_audio_utils.h>
+#include <atomic>
 #include <memory>
 #include <set>
 #include "StereoFifo.h"
@@ -58,6 +59,11 @@ public:
     bool isGroupSelected() const { return groupSelected; }
     void setGroupSelected (bool b);
 
+    // Receive mode: 0 = broadcast my own input (assigned peers can tune in); >0 = tune INTO that
+    // peer broadcast's channel id (downlink only). Switch while disconnected, then Connect.
+    int  getReceiveChannel() const { return receiveChannelId; }
+    void setReceiveChannel (int id) { receiveChannelId = id; }
+
 private:
     StereoFifo toNetwork   { 96000 };  // ~2 s at 48 kHz
     StereoFifo fromNetwork { 96000 };
@@ -65,6 +71,8 @@ private:
 
     juce::String instanceName;
     int channelId = 0;
+    int receiveChannelId = 0;            // 0 = broadcaster; >0 = receiving that channel
+    std::atomic<bool> uplinkEnabled { true };  // audio thread: push input only when broadcasting
     std::set<int> assignedPeers;
     bool groupSelected = false;
 

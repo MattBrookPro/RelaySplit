@@ -1,10 +1,12 @@
 # Plugin Phase 2 — native WebRTC client (BUILT)
 
 The plugin is now a native WebRTC peer to the Modal separator: it builds as **VST3 + Standalone**,
-captures the track's audio, ships it to the warm UK GPU over WebRTC (Opus), and plays back the
-separated vocal — with a latency meter. **The audio round-trip still needs a DAW/Standalone test on
-your machine** (autonomous testing can't drive real audio I/O), but it's compiled, linked, and the
-runtime DLLs are deployed.
+signs in to the control plane, **assigns peers** (session-aware matrix + group edit), and runs in two
+modes — **broadcast** (ship this track's audio to the GPU, monitor the separated vocal, and let
+assigned peers tune in) or **receive** (tune into a peer's broadcast, downlink only). It has a latency
+meter. **The audio round-trip still needs a DAW/Standalone listen on your machine** (autonomous
+testing can't drive real audio I/O), but it's compiled, linked, launches clean, and the runtime DLLs
+are deployed.
 
 ## Architecture (as built)
 
@@ -41,14 +43,21 @@ the need for `/FORCE:MULTIPLE`; left as a hardening option.)
 
 ## Test (your machine)
 
-1. **Standalone (easiest):** run `plugin\build\RelaySplit_artefacts\Release\Standalone\RelaySplit.exe`
+1. **Broadcast (easiest):** run `plugin\build\RelaySplit_artefacts\Release\Standalone\RelaySplit.exe`
    (the runtime DLLs sit beside it). Set the audio device to **48 kHz**, pick an input, click
-   **Connect**. You should hear the isolated vocal back, and the meter should show net RTT +
-   inference (~13 ms / ~118 ms, matching the browser client).
-2. **VST3:** copy `plugin\build\RelaySplit_artefacts\Release\VST3\RelaySplit.vst3` to your VST3 folder
-   (the bundle already contains its DLLs in `Contents\x86_64-win`). Load on a 48 kHz track, play a
-   song, Connect.
+   **Connect** (with "Listen to: Broadcast my input"). You should hear the isolated vocal back, and
+   the meter should show net RTT + inference (~13 ms / ~150 ms, matching the browser client).
+2. **Assign peers + receive:** log in (top of the window), use the **peer matrix** to assign peers to
+   this instance's broadcast, then on another machine/account either open the web **▶ Tune in** link
+   or, in another plugin instance, hit **↻** next to *Listen to*, pick the shared broadcast, and
+   **Connect** — it receives the separated vocal with no uplink.
+3. **Sibling / group edit:** load **multiple** instances in a DAW; they appear as rows in the matrix.
+   Tick the per-row selects and use the top **Group apply** chips to assign a peer across all selected
+   instances at once.
+4. **VST3:** copy `plugin\build\RelaySplit_artefacts\Release\VST3\RelaySplit.vst3` to your VST3 folder
+   (the bundle already contains its DLLs in `Contents\x86_64-win`). Load on a 48 kHz track, Connect.
 
-It targets the live container's self-contained `/offer` path
-(`https://blitzncs--relaysplit-live-web.modal.run`). Known follow-ups: host sample-rate ≠ 48 kHz
-needs resampling (assumed 48 kHz for now); RTT via `pc.rtt()`.
+Broadcast keys the stream by this instance's control-plane channel id (so assigned peers — and the web
+`/listen?channel=<id>` — find it); receive POSTs a recvonly offer to `/subscribe`. Both target the
+live container (`https://blitzncs--relaysplit-live-web.modal.run`). Known follow-ups: host sample-rate
+≠ 48 kHz needs resampling (assumed 48 kHz for now); RTT via `pc.rtt()`.

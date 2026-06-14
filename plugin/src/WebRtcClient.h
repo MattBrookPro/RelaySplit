@@ -15,10 +15,15 @@
 class WebRtcClient
 {
 public:
+    // Broadcast: send this track's input up + monitor the separated stream back (POST /offer).
+    // Receive:   downlink only — tune into a peer's broadcast, no uplink audio (POST /subscribe).
+    enum class Mode { Broadcast, Receive };
+
     WebRtcClient (StereoFifo& toNetwork, StereoFifo& fromNetwork);
     ~WebRtcClient();
 
-    void connect (const std::string& baseUrl);  // non-blocking: spins the worker + signalling
+    // non-blocking: spins the worker + signalling. `channel` keys the broadcast (empty = private solo).
+    void connect (const std::string& baseUrl, Mode mode = Mode::Broadcast, const std::string& channel = {});
     void disconnect();
 
     bool  isConnected() const  { return connected.load(); }
@@ -26,7 +31,7 @@ public:
     float inferenceMs() const  { return inferenceMsAtomic.load(); }
 
 private:
-    void run (std::string baseUrl);  // worker-thread body
+    void run (std::string baseUrl, Mode mode, std::string channel);  // worker-thread body
 
     StereoFifo& toNet;
     StereoFifo& fromNet;

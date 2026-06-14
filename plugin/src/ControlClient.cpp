@@ -80,3 +80,13 @@ bool ControlClient::setShares (int channelId, const std::set<int>& peerIds)
     auto res = post ("/api/channels/" + juce::String (channelId) + "/shares", juce::var (o));
     return res.getProperty ("ok", false);
 }
+
+std::vector<SharedBroadcast> ControlClient::sharedWithMe()
+{
+    std::vector<SharedBroadcast> out;
+    auto res = get ("/api/shared-with-me");
+    if (auto* arr = res.getProperty ("channels", {}).getArray())
+        for (auto& c : *arr)
+            out.push_back ({ (int) c["id"], c["name"].toString(), c["owner"].toString() });
+    return out;
+}
