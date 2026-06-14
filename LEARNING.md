@@ -210,6 +210,16 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
   buffer** to each `FanoutTrack` (lock on ~150 ms behind live, not at the bare edge) so bursty per-chunk
   production can't starve the steady 20 ms reads. Lesson: the measured "inference" is wall-clock around
   the executor, so it doubles as a thermometer for event-loop health, not just GPU compute.
+- **Latency assault → model swap (htdemucs → SCNet-small):** measured the fp16 forward across GPUs
+  (L40S 48 ms < L4 84 ms < A100 93 < A10G 114 — overhead-bound, so L40S clock wins) and reordered the
+  live GPU fallback to prefer L40S. Then researched modern alternatives: **HS-TasNet** (causal, 23 ms) is
+  the true low-latency model but has **no public weights** (training-only repos), so swapped to **SCNet-small**
+  (ZFTurbo MSST checkpoint, vocal SDR 9.90) — an A/B showed **~2.5× faster** forward (34.8 vs 85.9 ms on L4)
+  AND cleaner vocals by ear. Gotcha: SCNet is an STFT net, so with `cudnn.benchmark` on a varying input
+  length (context fill + adaptive hop) it re-tuned every call and spiked to 400 ms+ → **pad every segment
+  to a FIXED length** so one kernel stays warm. Result: inference **40–62 ms stable** (0/19 over budget),
+  **adaptive hop 0.10 s**, RTT 13 ms, **end-to-end ~0.22 s** (was ~0.42 s on htdemucs) — faster *and* better
+  quality. SCNet is still non-causal (the algorithmic hop floor remains); HS-TasNet is the only path under it.
 - **UX pass (responsiveness & clarity):** plugin Connect/Disconnect is now instant — `connect()` flags a
   `Connecting` state up front and `disconnect()` hands the worker join to a detached thread (FIFOs are
   `shared_ptr`, so a dying worker can't outlive its buffers); login **persists** to disk and a stale
