@@ -104,6 +104,7 @@ image = (
         "aiortc==1.9.0",
         "av==12.3.0",
         "fastapi[standard]==0.115.4",
+        "websockets==12.0",
     )
     .run_function(_bake_model)
     .run_function(_bake_demo)
@@ -211,7 +212,63 @@ $("start").onclick=start;$("stop").onclick=stop;
 """
 
 
-@app.function(image=image, gpu="L4", region=REGION, max_containers=1, scaledown_window=300)
+# GPU fallback list: keep the uk latency pin but schedule on whatever's available there — uk+L4
+# alone can hit capacity waits, which would leave an interviewer staring at "waiting for GPU".
+SESSION_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/><title>RelaySplit session (/ws)</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px}
+button{font-size:15px;padding:8px 16px;cursor:pointer}.b{font-family:ui-monospace,monospace;background:#eee;padding:2px 8px;border-radius:4px}
+.ok{background:#d4f7d4}.bad{background:#f7d4d4}#log{white-space:pre-wrap;background:#111;color:#6f6;padding:10px;border-radius:6px;margin-top:12px;font:12px ui-monospace,monospace;min-height:80px}</style>
+</head><body>
+<h1>RelaySplit — session via the VPS /ws control plane</h1>
+<p>Signalling goes through the VPS (not the container directly), the brief's end-state. Pick a file,
+   Start, hear the isolated vocal. <b>Headphones.</b></p>
+<div><input type="file" id="file" accept="audio/*"/> <label><input type="checkbox" id="mic"/> use mic</label></div>
+<div style="margin-top:10px"><button id="start">Start</button>
+ &nbsp; conn <span id="conn" class="b">—</span> &nbsp; RTT <span id="rtt" class="b">— ms</span> &nbsp; inference <span id="inf" class="b">— ms</span></div>
+<audio id="out" autoplay></audio><div id="log"></div>
+<script>
+const $=id=>document.getElementById(id),log=m=>{$("log").textContent+=m+"\n";console.log(m)};
+const VPS="wss://relaysplit.vaguelystrange.com/ws";
+let ws,pc,modalId;
+$("start").onclick=async()=>{
+ $("start").disabled=true;
+ try{
+  const {iceServers}=await (await fetch("ice")).json();
+  pc=new RTCPeerConnection({iceServers});
+  pc.onconnectionstatechange=()=>{const s=pc.connectionState;$("conn").textContent=s;$("conn").className="b "+(s=="connected"?"ok":(s=="failed"?"bad":""));if(s=="connected")poll()};
+  pc.ontrack=e=>{$("out").srcObject=e.streams[0]};
+  const dc=pc.createDataChannel("stats");
+  dc.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.infer_ms!=null)$("inf").textContent=d.infer_ms.toFixed(0)+" ms"}catch{}};
+  let src;
+  if($("mic").checked){src=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});}
+  else{const f=$("file").files[0];if(!f){log("pick a file or tick mic");$("start").disabled=false;return}
+   const a=new (window.AudioContext||window.webkitAudioContext)();const el=new Audio(URL.createObjectURL(f));el.loop=true;
+   const d=a.createMediaStreamDestination();a.createMediaElementSource(el).connect(d);await a.resume();await el.play();src=d.stream;}
+  src.getAudioTracks().forEach(t=>pc.addTrack(t,src));
+  ws=new WebSocket(VPS);
+  ws.onmessage=async ev=>{
+   const m=JSON.parse(ev.data);
+   if(m.type=="welcome"){ws.send(JSON.stringify({type:"join",room:"gpu-lobby",role:"sender"}))}
+   else if(m.type=="joined"){const mp=(m.peers||[]).find(p=>p.role=="modal");if(mp){modalId=mp.id;await sendOffer()}else log("no modal peer in room yet")}
+   else if(m.type=="peer-joined"&&m.role=="modal"&&!modalId){modalId=m.peerId;await sendOffer()}
+   else if(m.type=="signal"&&m.data&&m.data.type=="answer"){await pc.setRemoteDescription(m.data);log("answer applied — negotiating")}
+  };
+  ws.onerror=e=>log("ws error");
+ }catch(err){log("ERROR "+err);$("start").disabled=false}
+};
+async function sendOffer(){
+ await pc.setLocalDescription(await pc.createOffer());
+ await new Promise(r=>{if(pc.iceGatheringState=="complete")return r();const c=()=>{if(pc.iceGatheringState=="complete"){pc.removeEventListener("icegatheringstatechange",c);r()}};pc.addEventListener("icegatheringstatechange",c);setTimeout(r,4000)});
+ ws.send(JSON.stringify({type:"signal",to:modalId,data:{type:"offer",sdp:pc.localDescription.sdp}}));
+ log("offer sent to modal peer via /ws");
+}
+function poll(){setInterval(async()=>{const s=await pc.getStats();s.forEach(r=>{if(r.type=="candidate-pair"&&r.nominated&&r.currentRoundTripTime!=null)$("rtt").textContent=(r.currentRoundTripTime*1000).toFixed(0)+" ms"})},1000)}
+</script></body></html>
+"""
+
+
+@app.function(image=image, gpu=["L4", "A10G", "L40S", "A100"], region=REGION, max_containers=1, scaledown_window=300)
 @modal.concurrent(max_inputs=12)
 @modal.asgi_app()
 def web():
@@ -225,6 +282,7 @@ def web():
     import av
     import numpy as np
     import torch
+    import websockets
     from demucs.apply import apply_model
     from demucs.pretrained import get_model
     from aiortc import MediaStreamTrack, RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
@@ -346,6 +404,11 @@ def web():
     async def demo_track():
         return FileResponse(DEMO_TRACK, media_type="audio/ogg")
 
+    @api.get("/session", response_class=HTMLResponse)
+    async def session_page():
+        # Sender that signals through the VPS /ws control plane (vs the self-contained /offer path).
+        return SESSION_HTML
+
     @api.get("/ice")
     async def ice():
         return JSONResponse({"iceServers": get_ice()})
@@ -378,5 +441,55 @@ def web():
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         return JSONResponse({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
+
+    # --- VPS /ws session peer (brief's end-state: signalling via the control plane) ----------
+    # The container also joins the VPS /ws as a "modal" peer in a lobby room. A sender that joins the
+    # same room can negotiate via relayed signalling instead of the self-contained /offer above. This
+    # runs ALONGSIDE /offer (which keeps working), so it can't break the live demo.
+    VPS_WS = "wss://relaysplit.vaguelystrange.com/ws"
+    ROOM = "gpu-lobby"
+
+    async def handle_ws_offer(ws, sender_id, offer_sdp):
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[RTCIceServer(**s) for s in get_ice()]))
+        pcs.add(pc)
+        box = {}
+
+        @pc.on("datachannel")
+        def _dc(channel):
+            box["dc"] = channel
+
+        @pc.on("connectionstatechange")
+        async def _st():
+            if pc.connectionState in ("failed", "closed"):
+                await pc.close()
+                pcs.discard(pc)
+
+        @pc.on("track")
+        def _tr(track):
+            if track.kind == "audio":
+                pc.addTrack(SeparatedTrack(track, box))
+
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type="offer"))
+        await pc.setLocalDescription(await pc.createAnswer())
+        await ws.send(json.dumps({"type": "signal", "to": sender_id,
+                                  "data": {"type": "answer", "sdp": pc.localDescription.sdp}}))
+
+    async def ws_session_loop():
+        while True:
+            try:
+                async with websockets.connect(VPS_WS) as ws:
+                    await ws.send(json.dumps({"type": "join", "room": ROOM, "role": "modal", "name": "modal-gpu"}))
+                    log.info("joined VPS /ws room '%s' as modal peer", ROOM)
+                    async for raw in ws:
+                        msg = json.loads(raw)
+                        if msg.get("type") == "signal" and (msg.get("data") or {}).get("type") == "offer":
+                            await handle_ws_offer(ws, msg["from"], msg["data"]["sdp"])
+            except Exception as e:
+                log.warning("ws session loop reconnecting: %s", e)
+                await asyncio.sleep(3)
+
+    @api.on_event("startup")
+    async def _on_startup():
+        asyncio.ensure_future(ws_session_loop())
 
     return api
