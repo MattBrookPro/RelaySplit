@@ -150,8 +150,14 @@ async function start(){
       srcStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
     }else{
       const f=$("file").files[0]; if(!f){log("pick a file or tick mic");$("start").disabled=false;return}
-      const el=new Audio(URL.createObjectURL(f)); el.loop=true; await el.play();
-      srcStream=el.captureStream?el.captureStream():el.mozCaptureStream();
+      // Route the file through Web Audio to a capture destination and DO NOT connect to speakers,
+      // so ONLY the separated vocal coming back is audible (not the original mix overlaid).
+      const actx=new (window.AudioContext||window.webkitAudioContext)();
+      const el=new Audio(URL.createObjectURL(f)); el.loop=true;
+      const dest=actx.createMediaStreamDestination();
+      actx.createMediaElementSource(el).connect(dest);  // -> WebRTC only; not actx.destination => silent locally
+      await actx.resume(); await el.play();
+      srcStream=dest.stream;
     }
     srcStream.getAudioTracks().forEach(t=>pc.addTrack(t,srcStream));
     log("sending "+srcStream.getAudioTracks().length+" audio track(s)");
