@@ -26,6 +26,13 @@ import modal
 REGION = "uk"  # confirmed latency-critical pin (docs/setup-machine2.md)
 MODEL_NAME = "htdemucs"  # Demucs v4; sources: drums, bass, other, vocals
 
+# Chosen streaming config (confirmed by listening): 0.25 s chunk + 5 s past context + short
+# crossfade. chunk = algorithmic latency; context is free (already-captured past audio); fade is a
+# small future-lookahead that removes the click at block edges.
+CHUNK_S = 0.25
+CONTEXT_S = 5.0
+FADE_S = 0.02
+
 
 def _bake_model():
     from demucs.pretrained import get_model
@@ -114,34 +121,52 @@ class Separator:
             )[0]
         return out * std + mean
 
-    def _stream_vocals(self, wav, chunk_s, context_s):
-        """Simulate the live path: emit vocals block-by-block using PAST context only (no future
-        beyond the current chunk). Returns (vocals (ch,time) numpy, avg per-chunk infer ms)."""
+    def _stream_vocals(self, wav, chunk_s, context_s, fade_s=FADE_S):
+        """Simulate the live path: emit vocals block-by-block using PAST context, with a short
+        LINEAR crossfade between consecutive blocks so edges don't click. Each block is fed
+        [pos-context, pos+chunk+fade]; the `fade` overlap is a small future-lookahead, so live
+        algorithmic latency = chunk + fade. Linear (not equal-power) because adjacent blocks are the
+        same vocal, just computed with slightly different context — they sum to a constant level.
+        Returns (vocals (ch,time) numpy, avg per-chunk infer ms)."""
         import time
 
-        torch = self.torch
-        sr = self.sr
-        chunk = max(1, int(chunk_s * sr))
-        ctx = int(context_s * sr)
-        ref = wav.mean(0)
-        mean, std = ref.mean(), ref.std() + 1e-8  # global normalisation
+        import numpy as np
 
-        pos, outs, infer_total, nb = 0, [], 0.0, 0
+        sr = self.sr
+        hop = max(1, int(chunk_s * sr))
+        ola = max(0, int(fade_s * sr))
+        ctx = int(context_s * sr)
+        max_seg = int(7.6 * sr)  # Demucs htdemucs window is ~7.8 s — keep the fed segment under it
+        ref = wav.mean(0)
+        mean, std = ref.mean(), ref.std() + 1e-8  # global normalisation (no inter-block pumping)
+
         total = wav.shape[1]
+        out = np.zeros((wav.shape[0], total), dtype="float32")
+        fade_in = np.linspace(0.0, 1.0, ola, dtype="float32") if ola else None
+        fade_out = np.linspace(1.0, 0.0, ola, dtype="float32") if ola else None
+
+        infer_total, nb, pos, k = 0.0, 0, 0, 0
         while pos < total:
-            end = min(pos + chunk, total)
-            start = max(0, pos - ctx)
-            seg = wav[:, start:end].contiguous()
+            seg_end = min(pos + hop + ola, total)  # +ola future-lookahead for the crossfade tail
+            start = max(0, pos - ctx, seg_end - max_seg)  # cap context to the model window
+            seg = wav[:, start:seg_end].contiguous()
             t0 = time.perf_counter()
-            out = self._separate_seg(seg, mean, std, split=False)  # small seg -> single pass
+            est = self._separate_seg(seg, mean, std, split=False)  # single pass (seg < window)
             self._sync()
             infer_total += time.perf_counter() - t0
             nb += 1
-            voc = out[self.voc_idx]  # (ch, segtime)
-            outs.append(voc[:, pos - start : pos - start + (end - pos)].cpu())
-            pos = end
-        vocals = torch.cat(outs, dim=1).numpy()
-        return vocals, (infer_total / max(nb, 1)) * 1000
+
+            blk = est[self.voc_idx].cpu().numpy()[:, pos - start : seg_end - start]  # region [pos, seg_end)
+            length = blk.shape[1]
+            win = np.ones(length, dtype="float32")
+            if ola and k > 0:  # crossfade with the previous block's faded-out tail
+                win[:ola] = fade_in
+            if ola and seg_end < total:  # this tail gets crossfaded by the next block's fade-in
+                win[-ola:] = fade_out
+            out[:, pos : pos + length] += blk * win
+            pos += hop
+            k += 1
+        return out, (infer_total / max(nb, 1)) * 1000
 
     # ---- entrypoint methods ---------------------------------------------------------------
     @modal.method()
@@ -185,21 +210,25 @@ class Separator:
         }
 
     @modal.method()
-    def latency_sweep(self, audio_bytes: bytes, configs, max_seconds: int = 20):
-        """For each [chunk_s, context_s]: stream the clip and report measured latency + the vocal
-        WAV, so we can hear where quality breaks vs how low the latency goes."""
+    def latency_sweep(self, audio_bytes: bytes, configs, max_seconds: int = 20, fade_s: float = FADE_S):
+        """For each [chunk_s, context_s]: stream the clip (with crossfade) and report measured
+        latency + the vocal WAV. Algorithmic latency = chunk + fade (the crossfade lookahead)."""
         wav = self._decode(audio_bytes, max_seconds)
         results = []
         for chunk_s, context_s in configs:
-            vocals, infer_ms = self._stream_vocals(wav, chunk_s, context_s)
+            vocals, infer_ms = self._stream_vocals(wav, chunk_s, context_s, fade_s)
+            algo_ms = (chunk_s + fade_s) * 1000
             results.append(
                 {
                     "chunk_s": chunk_s,
                     "context_s": context_s,
-                    "algo_latency_ms": round(chunk_s * 1000, 1),
+                    "fade_ms": round(fade_s * 1000, 1),
+                    "algo_latency_ms": round(algo_ms, 1),
                     "infer_ms_per_chunk": round(infer_ms, 1),
-                    # live latency = buffer the chunk + infer it (+ network RTT, added in the live path)
-                    "live_latency_est_ms": round(chunk_s * 1000 + infer_ms, 1),
+                    # live latency = buffer the chunk+fade + infer it (+ network RTT in the live path)
+                    "live_latency_est_ms": round(algo_ms + infer_ms, 1),
+                    # real-time only holds if a chunk infers faster than its own hop
+                    "rt_feasible": bool(infer_ms < chunk_s * 1000),
                     "vocals_wav": self._to_wav(vocals),
                 }
             )
@@ -234,15 +263,15 @@ def sweep(input: str, outdir: str = "."):
 
     with open(input, "rb") as f:
         data = f.read()
-    # chunk_s (latency) shrinks; context_s (past, free-latency) kept generous for quality.
-    configs = [[2.0, 4.0], [1.0, 3.0], [0.5, 2.0], [0.25, 1.5]]
+    # Render the chosen streaming config WITH crossfade, to confirm the block edges are clean.
+    configs = [[CHUNK_S, CONTEXT_S]]
     res = Separator().latency_sweep.remote(data, configs)
     print(f"sr={res['sr']}")
-    print(f"{'chunk_s':>8} {'ctx_s':>6} {'algo_ms':>8} {'infer_ms':>9} {'live_est_ms':>12}")
     for r in res["results"]:
-        print(f"{r['chunk_s']:>8} {r['context_s']:>6} {r['algo_latency_ms']:>8} "
-              f"{r['infer_ms_per_chunk']:>9} {r['live_latency_est_ms']:>12}")
-        p = os.path.join(outdir, f"sweep_vocals_chunk{r['chunk_s']}.wav")
+        print(f"chunk={r['chunk_s']}s ctx={r['context_s']}s fade={r['fade_ms']}ms  "
+              f"algo={r['algo_latency_ms']}ms  infer={r['infer_ms_per_chunk']}ms  "
+              f"live_est={r['live_latency_est_ms']}ms  rt={r['rt_feasible']}")
+        p = os.path.join(outdir, f"final_voc_c{r['chunk_s']}_ctx{r['context_s']}_xfade.wav")
         with open(p, "wb") as f:
             f.write(r["vocals_wav"])
         print("  wrote", p)
