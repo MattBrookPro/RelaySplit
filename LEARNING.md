@@ -117,13 +117,25 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
 - **(d)** *"Audio runs over WebRTC to a warm GPU, the vocal is separated by a streaming model, and
   it comes back in real time — and I show the measured network RTT and inference time on screen, so
   the latency is owned, not hidden."*
+- **Measured live (L4, 2026-06-14):** net RTT **13 ms** (UK↔UK), inference **~118 ms**/chunk →
+  end-to-end ≈ 270 ms (chunk+fade) + 118 ms + 13 ms ≈ **~0.4 s** mouth-to-ear through a cloud GPU.
+  fp16 + a faster GPU are the levers to cut the inference term further.
 
-### ⏳ Still to build — VPS `/ws` session model · accounts/hub/receiver · JUCE plugin
-- The live demo uses self-contained signalling; next is joining the container to the VPS `/ws` as a
-  proper session peer, then the account/peer/channel/hub system, then the JUCE plugin (C++,
-  lock-free audio thread) as a native client. **Interview-honest:** "transport, control plane, GPU
-  model, and the live round-trip with a latency meter all work; the session/account layer and the
-  native plugin are the next slices."
+### 🟡 C++ / JUCE plugin — foundation builds (Phase 1); WebRTC client = Phase 2
+- **(b)** [`plugin/`](plugin/) — JUCE plugin (VST3 + Standalone) built with CMake + MSVC 2026.
+- **(c)** Proves the JD's C++/JUCE, cross-platform CMake build, and VST/AU/AAX-formats lines with a
+  real artifact. `processBlock` is real-time-safe (passthrough now; Phase 2 does only lock-free FIFO
+  moves); the latency-meter UI polls atomics. The audio-thread discipline (no lock/alloc/socket on
+  the callback) is the showcase. Phase 2 adds the WebRTC client (libdatachannel + Opus).
+- **(d)** *"It's a JUCE plugin that builds as VST3 and Standalone; the audio callback never blocks —
+  networking and inference run off-thread across lock-free FIFOs."*
+
+### ⏳ Still to build — VPS `/ws` session model · accounts/hub/receiver · plugin WebRTC client
+- The live (browser) demo uses self-contained signalling; next is joining the container to the VPS
+  `/ws` as a proper session peer, then the account/peer/channel/hub system, then the plugin's WebRTC
+  client (libdatachannel + Opus). **Interview-honest:** "transport, control plane, GPU model, and
+  the live round-trip with a latency meter all work; the session/account layer and the plugin's
+  WebRTC client are the next slices."
 
 ---
 
