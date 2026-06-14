@@ -158,6 +158,10 @@ RelaySplit splits cleanly into two planes, and almost every design decision fall
 - **(b)** [`plugin/`](plugin/) — VST3 + Standalone (CMake + MSVC 2026). [`WebRtcClient.cpp`](plugin/src/WebRtcClient.cpp)
   is a native WebRTC peer (libdatachannel + Opus via vcpkg); [`StereoFifo.h`](plugin/src/StereoFifo.h)
   is the lock-free audio↔network handoff; `processBlock` only interleaves/copies samples.
+- **Session-aware peer assignment:** [`InstanceRegistry`](plugin/src/InstanceRegistry.h) (process-static)
+  makes every RelaySplit instance in the DAW session discoverable; [`PeerMatrix`](plugin/src/PeerMatrix.h)
+  assigns any number of peers per instance and **group-edits** across selected instances;
+  [`ControlClient`](plugin/src/ControlClient.cpp) logs in and syncs shares to the control plane.
 - **(c)** Evidences C++/JUCE, cross-platform CMake build, VST/AU/AAX formats, multithreading, AND
   real-time discipline in one artifact: no lock/alloc/socket on the audio callback — Opus encode/
   decode, RTP, ICE/DTLS/SRTP and the signalling all run on a worker thread. Signalling replicates
