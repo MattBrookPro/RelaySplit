@@ -1,0 +1,161 @@
+#include "ControlClient.h"
+
+ControlClient& ControlClient::get() { static ControlClient instance; return instance; }
+
+juce::var ControlClient::get (const juce::String& path)
+{
+    juce::URL url (juce::String (kBase) + path);
+    auto opts = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
+                    .withExtraHeaders (token.isNotEmpty() ? ("Authorization: Bearer " + token) : juce::String())
+                    .withConnectionTimeoutMs (15000);
+    auto stream = url.createInputStream (opts);
+    auto res = stream ? juce::JSON::parse (stream->readEntireStreamAsString()) : juce::var();
+    maybeHandleAuthError (res);
+    return res;
+}
+
+juce::var ControlClient::post (const juce::String& path, const juce::var& body)
+{
+    auto url = juce::URL (juce::String (kBase) + path).withPOSTData (juce::JSON::toString (body));
+    juce::String headers = "Content-Type: application/json";
+    if (token.isNotEmpty()) headers << "\r\nAuthorization: Bearer " << token;
+    auto opts = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inPostData)
+                    .withExtraHeaders (headers)
+                    .withConnectionTimeoutMs (20000);
+    auto stream = url.createInputStream (opts);
+    auto res = stream ? juce::JSON::parse (stream->readEntireStreamAsString()) : juce::var();
+    maybeHandleAuthError (res);
+    return res;
+}
+
+// A restored token may be expired/revoked; when the server says so, drop it so the UI shows the
+// login form again instead of a dead "signed in" state. (Only fires while we think we're logged in,
+// so a 401 on an already-anonymous call can't loop.)
+void ControlClient::maybeHandleAuthError (const juce::var& res)
+{
+    if (token.isNotEmpty() && res.isObject()
+        && res.getProperty ("error", {}).toString() == "unauthorized")
+    {
+        token = {}; username = {}; cachedPeers.clear();
+        clearSession();
+    }
+}
+
+static juce::File sessionFile()
+{
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+               .getChildFile ("RelaySplit").getChildFile ("session.json");
+}
+
+void ControlClient::loadSession()
+{
+    auto f = sessionFile();
+    if (! f.existsAsFile()) return;
+    auto v = juce::JSON::parse (f.loadFileAsString());
+    if (v.isObject())
+    {
+        token = v.getProperty ("token", {}).toString();
+        username = v.getProperty ("username", {}).toString();
+    }
+}
+
+void ControlClient::saveSession()
+{
+    auto f = sessionFile();
+    f.getParentDirectory().createDirectory();
+    auto* o = new juce::DynamicObject();
+    o->setProperty ("token", token);
+    o->setProperty ("username", username);
+    f.replaceWithText (juce::JSON::toString (juce::var (o)));
+}
+
+void ControlClient::clearSession() { sessionFile().deleteFile(); }
+
+juce::String ControlClient::login (const juce::String& user, const juce::String& pass)
+{
+    auto* o = new juce::DynamicObject();
+    o->setProperty ("username", user);
+    o->setProperty ("password", pass);
+    auto res = post ("/api/login", juce::var (o));
+    if (! res.isObject()) return "no response from server";
+    if (res.hasProperty ("error")) return res["error"].toString();
+    token = res["token"].toString();
+    username = user;
+    cachedPeers.clear();
+    saveSession();   // remember the login across DAW restarts (24 h server-side TTL)
+    peers (true);
+    return token.isNotEmpty() ? juce::String() : "login failed";
+}
+
+void ControlClient::logout() { token = {}; username = {}; cachedPeers.clear(); clearSession(); }
+
+const std::vector<Peer>& ControlClient::peers (bool forceRefresh)
+{
+    if (! forceRefresh && ! cachedPeers.empty()) return cachedPeers;
+    cachedPeers.clear();
+    auto res = get ("/api/peers");
+    if (auto* arr = res.getProperty ("peers", {}).getArray())
+        for (auto& p : *arr)
+            cachedPeers.push_back ({ (int) p["id"], p["username"].toString() });
+    return cachedPeers;
+}
+
+int ControlClient::createChannel (const juce::String& name, const juce::String& stem)
+{
+    auto* o = new juce::DynamicObject();
+    o->setProperty ("name", name);
+    o->setProperty ("stem", stem);
+    auto res = post ("/api/channels", juce::var (o));
+    auto ch = res.getProperty ("channel", {});
+    return ch.isObject() ? (int) ch["id"] : 0;
+}
+
+std::set<int> ControlClient::getShares (int channelId)
+{
+    std::set<int> out;
+    auto res = get ("/api/channels/" + juce::String (channelId) + "/shares");
+    if (auto* arr = res.getProperty ("shared", {}).getArray())
+        for (auto& s : *arr) out.insert ((int) s["id"]);
+    return out;
+}
+
+bool ControlClient::setShares (int channelId, const std::set<int>& peerIds)
+{
+    juce::Array<juce::var> ids;
+    for (int id : peerIds) ids.add (id);
+    auto* o = new juce::DynamicObject();
+    o->setProperty ("peerIds", juce::var (ids));
+    auto res = post ("/api/channels/" + juce::String (channelId) + "/shares", juce::var (o));
+    return res.getProperty ("ok", false);
+}
+
+std::vector<SharedBroadcast> ControlClient::sharedWithMe()
+{
+    std::vector<SharedBroadcast> out;
+    auto res = get ("/api/shared-with-me");
+    if (auto* arr = res.getProperty ("channels", {}).getArray())
+        for (auto& c : *arr)
+            out.push_back ({ (int) c["id"], c["name"].toString(), c["owner"].toString() });
+    return out;
+}
+
+std::set<int> ControlClient::liveChannels()
+{
+    // Ask the VPS (NOT the GPU) which broadcasts are on air. Polling the GPU container directly would
+    // keep it warm and run up cost; the VPS serves liveness from a registry the container reports into,
+    // so an idle plugin can't hold the GPU open. Live sources still drop out within the registry TTL.
+    std::set<int> out;
+    juce::URL url (juce::String (kBase) + "/api/live");
+    auto stream = url.createInputStream (
+        juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress).withConnectionTimeoutMs (8000));
+    if (stream == nullptr) return out;
+    auto res = juce::JSON::parse (stream->readEntireStreamAsString());
+    if (auto* arr = res.getProperty ("broadcasts", {}).getArray())
+        for (auto& b : *arr)
+            if ((bool) b.getProperty ("live", false))
+            {
+                const int id = b.getProperty ("channel", {}).toString().getIntValue();  // 0 for "solo-…"
+                if (id > 0) out.insert (id);
+            }
+    return out;
+}

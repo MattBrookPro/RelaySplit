@@ -1,0 +1,10 @@
+# Normalise line endings: the repo stores LF, so Linux (VPS) checkouts and shell scripts
+# never get CRLF-mangled even though development happens on Windows.
+* text=auto eol=lf
+
+# Treat these as binary (no EOL conversion, no diff).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.vst3 binary

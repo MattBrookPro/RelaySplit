@@ -1,0 +1,55 @@
+# ---- Secrets / env ----
+# The TURN secret and other creds live in .env on the VPS — never commit them.
+.env
+.env.*
+!.env.example
+
+# ---- Node / web client ----
+node_modules/
+dist/
+build/
+build-*/
+.cache/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp.*
+coverage/
+
+# ---- Python / Modal ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---- C++ / JUCE / CMake (Phase 4) ----
+[Bb]uild/
+[Bb]uilds/
+cmake-build-*/
+JuceLibraryCode/
+*.obj
+*.o
+*.exe
+*.dll
+*.lib
+*.pdb
+*.vcxproj.user
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.vs/
+.vscode/
+.idea/
+*.swp
+
+# Audio test artifacts (listen-test inputs/outputs)
+*.wav
+*.ogg
+*.flac
+*.mp3
